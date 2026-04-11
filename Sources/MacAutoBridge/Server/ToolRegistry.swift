@@ -212,7 +212,7 @@ final class ToolRegistry: @unchecked Sendable {
                     "Navigate to a folder in a macOS file dialog (Open/Save panel). Sends Cmd+Shift+G, types the path, and presses Enter. Verifies the folder name appears after navigation.",
                 props: [
                     "bundle_id": str("App bundle identifier"),
-                    "path": str("Absolute path to navigate to, e.g. /Users/jinchen/Downloads/pcea-audio"),
+                    "path": str("Absolute path to navigate to, e.g. /Users/me/Downloads"),
                 ],
                 required: ["bundle_id", "path"]),
 

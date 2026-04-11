@@ -1,15 +1,9 @@
 import Foundation
 import AppKit
 
-let logFile = FileHandle(forWritingAtPath: "/tmp/mac-auto-bridge.log")
-    ?? { FileManager.default.createFile(atPath: "/tmp/mac-auto-bridge.log", contents: nil)
-        return FileHandle(forWritingAtPath: "/tmp/mac-auto-bridge.log")! }()
-
 func log(_ msg: String) {
     let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
     fputs(line, stderr)
-    logFile.seekToEndOfFile()
-    logFile.write(line.data(using: .utf8)!)
 }
 
 /// Read stdin on a dedicated thread so the main RunLoop stays free for AppKit / MainActor work.
