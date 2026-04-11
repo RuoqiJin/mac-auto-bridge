@@ -66,14 +66,12 @@ final class MVPFacade: @unchecked Sendable {
 
     // MARK: - High-Level Workflows
 
-    /// Snapshot: one call returns window list + focused window AX tree + OCR text.
-    /// Eliminates the capture_app → ax_snapshot → list_windows triple-call pattern.
-    func snapshot(bundleID: String) async throws -> [String: Any] {
+    /// Snapshot: one call returns window list + focused window AX tree (+ optional OCR).
+    /// Default: windows + AX only (instant). Set includeOCR=true for text entries (slower).
+    func snapshot(bundleID: String, includeOCR: Bool = false) async throws -> [String: Any] {
         let windows = focus.listWindows(bundleID: bundleID)
         let axTree: AXNode? = try? AXManager.shared.snapshotFocusedWindow(
             bundleID: bundleID, maxDepth: 3)
-        let ocrResult: (CGImage, [OCRTextEntry])? = try? await ocr.captureAndRecognize(
-            bundleID: bundleID)
 
         var result: [String: Any] = [:]
         result["windows"] = windows.map { $0.toJSON() }
@@ -83,11 +81,13 @@ final class MVPFacade: @unchecked Sendable {
             result["focused_window_ax"] = ax.toJSON()
         }
 
-        if let (image, entries) = ocrResult {
-            result["ocr_width"] = image.width
-            result["ocr_height"] = image.height
-            result["ocr_entries"] = entries.map { $0.toJSON() }
-            result["ocr_entry_count"] = entries.count
+        if includeOCR {
+            if let (image, entries) = try? await ocr.captureAndRecognize(bundleID: bundleID) {
+                result["ocr_width"] = image.width
+                result["ocr_height"] = image.height
+                result["ocr_entries"] = entries.map { $0.toJSON() }
+                result["ocr_entry_count"] = entries.count
+            }
         }
 
         return result

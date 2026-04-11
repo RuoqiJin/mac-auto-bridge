@@ -106,9 +106,9 @@ final class OCRManager: @unchecked Sendable {
 
     func recognizeText(in image: CGImage) throws -> [OCRTextEntry] {
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
+        request.recognitionLevel = .fast
         request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en"]
-        request.usesLanguageCorrection = true
+        request.usesLanguageCorrection = false
 
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         try handler.perform([request])

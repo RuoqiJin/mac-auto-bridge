@@ -173,8 +173,11 @@ final class ToolRegistry: @unchecked Sendable {
             tool(
                 "snapshot",
                 desc:
-                    "All-in-one observation: returns window list + focused window AX tree (depth 3) + OCR text entries in a single call. Use this instead of calling list_windows + ax_snapshot + capture_app separately.",
-                props: ["bundle_id": str("App bundle identifier")],
+                    "All-in-one observation: returns window list + focused window AX tree (depth 3). Set include_ocr=true to also capture+OCR (slower). Default is fast mode without OCR.",
+                props: [
+                    "bundle_id": str("App bundle identifier"),
+                    "include_ocr": bool("Include OCR text entries (slower, default false)"),
+                ],
                 required: ["bundle_id"]),
 
             tool(
@@ -335,7 +338,8 @@ final class ToolRegistry: @unchecked Sendable {
 
         case "snapshot":
             let bid = args["bundle_id"] as! String
-            let result = try await mvp.snapshot(bundleID: bid)
+            let includeOCR = args["include_ocr"] as? Bool ?? false
+            let result = try await mvp.snapshot(bundleID: bid, includeOCR: includeOCR)
             return jsonResult(result)
 
         case "goto_folder":
