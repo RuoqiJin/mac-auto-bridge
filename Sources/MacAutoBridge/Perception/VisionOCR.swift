@@ -98,6 +98,81 @@ final class OCRManager: @unchecked Sendable {
         return (image, screenEntries)
     }
 
+    /// Capture only — NO OCR at all. For capture_to_file where we just need the image.
+    func captureOnly(bundleID: String, windowTitle: String? = nil) async throws -> CGImage {
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: true)
+
+        if let title = windowTitle {
+            guard let window = selectBestWindow(
+                from: content.windows, bundleID: bundleID, windowTitle: title)
+            else {
+                throw BridgeError.elementNotFound("Window '\(title)' for \(bundleID)")
+            }
+            let scale = displayScale(for: window.frame)
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let config = SCStreamConfiguration()
+            config.width = Int(window.frame.width * scale)
+            config.height = Int(window.frame.height * scale)
+            config.showsCursor = false
+            return try await SCScreenshotManager.captureImage(
+                contentFilter: filter, configuration: config)
+        }
+
+        // App-level capture (includes popups/menus)
+        guard let app = content.applications.first(where: {
+            $0.bundleIdentifier == bundleID
+        }) else {
+            throw BridgeError.elementNotFound("App not found: \(bundleID)")
+        }
+
+        let appWindows = content.windows.filter {
+            $0.owningApplication?.bundleIdentifier == bundleID
+                && $0.isOnScreen && $0.frame.width > 10 && $0.frame.height > 10
+        }
+        guard !appWindows.isEmpty else {
+            throw BridgeError.elementNotFound("No visible windows for \(bundleID)")
+        }
+
+        var unionRect = appWindows[0].frame
+        for w in appWindows.dropFirst() { unionRect = unionRect.union(w.frame) }
+
+        let center = CGPoint(x: unionRect.midX, y: unionRect.midY)
+        guard let displayID = DisplayManager.shared.displayContaining(point: center),
+            let display = content.displays.first(where: { $0.displayID == displayID })
+        else {
+            // Fallback: single largest window
+            let w = appWindows.max(by: {
+                ($0.frame.width * $0.frame.height) < ($1.frame.width * $1.frame.height)
+            })!
+            let scale = displayScale(for: w.frame)
+            let filter = SCContentFilter(desktopIndependentWindow: w)
+            let config = SCStreamConfiguration()
+            config.width = Int(w.frame.width * scale)
+            config.height = Int(w.frame.height * scale)
+            config.showsCursor = false
+            return try await SCScreenshotManager.captureImage(
+                contentFilter: filter, configuration: config)
+        }
+
+        let scale = DisplayManager.shared.scaleFor(display: displayID)
+        let displayBounds = CGDisplayBounds(displayID)
+        let sourceRect = CGRect(
+            x: unionRect.origin.x - displayBounds.origin.x,
+            y: unionRect.origin.y - displayBounds.origin.y,
+            width: unionRect.width, height: unionRect.height)
+
+        let filter = SCContentFilter(
+            display: display, including: [app], exceptingWindows: [])
+        let config = SCStreamConfiguration()
+        config.sourceRect = sourceRect
+        config.width = Int(unionRect.width * scale)
+        config.height = Int(unionRect.height * scale)
+        config.showsCursor = false
+        return try await SCScreenshotManager.captureImage(
+            contentFilter: filter, configuration: config)
+    }
+
     /// Single window capture (original behavior — for targeted window_title queries)
     private func captureSingleWindow(window: SCWindow, fast: Bool) async throws -> (
         CGImage, [OCRTextEntry]

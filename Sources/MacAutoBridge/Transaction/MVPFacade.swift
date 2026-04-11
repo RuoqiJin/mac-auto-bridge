@@ -155,7 +155,7 @@ final class MVPFacade: @unchecked Sendable {
     func captureToFile(bundleID: String, windowTitle: String?, filePath: String?) async throws
         -> String
     {
-        let (image, _) = try await ocr.captureAndRecognize(bundleID: bundleID, windowTitle: windowTitle)
+        let image = try await ocr.captureOnly(bundleID: bundleID, windowTitle: windowTitle)
 
         let path = filePath ?? "/tmp/mac-auto-bridge-capture-\(Int(Date().timeIntervalSince1970)).png"
         let url = URL(fileURLWithPath: path)
