@@ -15,13 +15,93 @@ final class OCRManager: @unchecked Sendable {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
 
-        guard
-            let window = selectBestWindow(
-                from: content.windows, bundleID: bundleID, windowTitle: windowTitle)
-        else {
-            throw BridgeError.elementNotFound("Window for \(bundleID)")
+        // If windowTitle specified → single window capture (precise)
+        if windowTitle != nil {
+            guard
+                let window = selectBestWindow(
+                    from: content.windows, bundleID: bundleID, windowTitle: windowTitle)
+            else {
+                throw BridgeError.elementNotFound("Window '\(windowTitle!)' for \(bundleID)")
+            }
+            return try await captureSingleWindow(window: window, fast: fast)
         }
 
+        // Default: capture ALL windows from this app (includes popups, dialogs, menus)
+        guard let app = content.applications.first(where: {
+            $0.bundleIdentifier == bundleID
+        }) else {
+            throw BridgeError.elementNotFound("App not found: \(bundleID)")
+        }
+
+        let appWindows = content.windows.filter {
+            $0.owningApplication?.bundleIdentifier == bundleID
+                && $0.isOnScreen && $0.frame.width > 10 && $0.frame.height > 10
+        }
+        guard !appWindows.isEmpty else {
+            throw BridgeError.elementNotFound("No visible windows for \(bundleID)")
+        }
+
+        // Compute bounding box of all app windows
+        var unionRect = appWindows[0].frame
+        for w in appWindows.dropFirst() {
+            unionRect = unionRect.union(w.frame)
+        }
+
+        // Find display containing the main window
+        let center = CGPoint(x: unionRect.midX, y: unionRect.midY)
+        guard let displayID = DisplayManager.shared.displayContaining(point: center),
+            let display = content.displays.first(where: { $0.displayID == displayID })
+        else {
+            // Fallback: single window capture
+            let fallback = selectBestWindow(
+                from: content.windows, bundleID: bundleID, windowTitle: nil)!
+            return try await captureSingleWindow(window: fallback, fast: fast)
+        }
+
+        let scale = DisplayManager.shared.scaleFor(display: displayID)
+        let displayBounds = CGDisplayBounds(displayID)
+
+        // Convert union rect from screen-global to display-local coordinates
+        let sourceRect = CGRect(
+            x: unionRect.origin.x - displayBounds.origin.x,
+            y: unionRect.origin.y - displayBounds.origin.y,
+            width: unionRect.width,
+            height: unionRect.height
+        )
+
+        let filter = SCContentFilter(
+            display: display, including: [app], exceptingWindows: [])
+        let config = SCStreamConfiguration()
+        config.sourceRect = sourceRect
+        config.width = Int(unionRect.width * scale)
+        config.height = Int(unionRect.height * scale)
+        config.showsCursor = false
+
+        let image = try await SCScreenshotManager.captureImage(
+            contentFilter: filter, configuration: config)
+        let rawEntries = try recognizeText(in: image, fast: fast)
+
+        // Convert OCR pixel coords → screen-global coords (relative to unionRect origin)
+        let screenEntries = rawEntries.map { entry in
+            OCRTextEntry(
+                text: entry.text,
+                frame: CGRect(
+                    x: unionRect.origin.x + entry.frame.origin.x / scale,
+                    y: unionRect.origin.y + entry.frame.origin.y / scale,
+                    width: entry.frame.width / scale,
+                    height: entry.frame.height / scale
+                ),
+                confidence: entry.confidence
+            )
+        }
+
+        return (image, screenEntries)
+    }
+
+    /// Single window capture (original behavior — for targeted window_title queries)
+    private func captureSingleWindow(window: SCWindow, fast: Bool) async throws -> (
+        CGImage, [OCRTextEntry]
+    ) {
         let windowFrame = window.frame
         let scale = displayScale(for: windowFrame)
 
@@ -35,7 +115,6 @@ final class OCRManager: @unchecked Sendable {
             contentFilter: filter, configuration: config)
         let rawEntries = try recognizeText(in: image, fast: fast)
 
-        // Convert OCR pixel coords → screen-global coords
         let screenEntries = rawEntries.map { entry in
             OCRTextEntry(
                 text: entry.text,
