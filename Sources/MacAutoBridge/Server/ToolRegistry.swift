@@ -118,6 +118,32 @@ final class ToolRegistry: @unchecked Sendable {
                 ],
                 required: ["bundle_id", "key_code"]),
 
+            tool(
+                "drag",
+                desc:
+                    "Drag from one point to another (10-step interpolated). Use for timeline manipulation, moving items, etc.",
+                props: [
+                    "bundle_id": str("App bundle identifier for focus lock"),
+                    "from_x": num("Start X coordinate"),
+                    "from_y": num("Start Y coordinate"),
+                    "to_x": num("End X coordinate"),
+                    "to_y": num("End Y coordinate"),
+                ],
+                required: ["bundle_id", "from_x", "from_y", "to_x", "to_y"]),
+
+            tool(
+                "right_click",
+                desc:
+                    "Right-click at a target to open context menu. Supports OCR text or coordinates.",
+                props: [
+                    "bundle_id": str("App bundle identifier for focus lock"),
+                    "target_text": str("Right-click on this text (found via OCR)"),
+                    "x": num("Right-click at X coordinate"),
+                    "y": num("Right-click at Y coordinate"),
+                    "nth": int("Which occurrence of target_text (default 1)"),
+                ],
+                required: ["bundle_id"]),
+
             // ── Transaction ──
             tool(
                 "wait_until",
@@ -286,6 +312,38 @@ final class ToolRegistry: @unchecked Sendable {
             defer { focus.release() }
             try events.pressKey(keyCode: keyCode, flags: flags)
             return textResult("Pressed key \(keyCode)")
+
+        case "drag":
+            let bid = args["bundle_id"] as! String
+            let fromX = args["from_x"] as! Double
+            let fromY = args["from_y"] as! Double
+            let toX = args["to_x"] as! Double
+            let toY = args["to_y"] as! Double
+            _ = try await focus.acquire(bundleID: bid)
+            defer { focus.release() }
+            try events.drag(
+                from: CGPoint(x: fromX, y: fromY),
+                to: CGPoint(x: toX, y: toY))
+            return textResult(
+                "Dragged (\(Int(fromX)),\(Int(fromY))) → (\(Int(toX)),\(Int(toY)))")
+
+        case "right_click":
+            let bid = args["bundle_id"] as! String
+            let nth = args["nth"] as? Int ?? 1
+            _ = try await focus.acquire(bundleID: bid)
+            defer { focus.release() }
+            let point: CGPoint
+            if let text = args["target_text"] as? String {
+                let rect = try await locator.resolve(
+                    locator: .ocr(text), bundleID: bid, nth: nth)
+                point = rectCenter(rect)
+            } else {
+                let x = args["x"] as? Double ?? 0
+                let y = args["y"] as? Double ?? 0
+                point = CGPoint(x: x, y: y)
+            }
+            try events.click(at: point, button: .right)
+            return textResult("Right-clicked at (\(Int(point.x)), \(Int(point.y)))")
 
         // ── Transaction ──
 

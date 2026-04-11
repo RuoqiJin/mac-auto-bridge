@@ -8,6 +8,10 @@
 ;; macOS 14+ | Swift 5.10+ | MCP JSON-RPC 2.0 over stdio
 ;; cc997cc: 5 real-world fixes — WindowRanker / multi-display OCR / WindowFilter /
 ;;          AX-value verification / pretty-printed JSON
+;; 1de5e17: robust app discovery for MCP child processes + diagnose tool
+;; ede7689: aggressive focus (AppleScript fallback 4s) + CGWindowList title fallback
+;; fe968a8: snapshot + goto_folder composite tools (−60% tool calls)
+;; 7edfa14: snapshot default fast mode (no OCR) + OCR .accurate→.fast
 
 (intent mac-auto-bridge
   (granularity L3-implementation)
@@ -38,9 +42,13 @@
       :target "Sources/MacAutoBridge/Perception/AXObserver.swift"
       :doc "Accessibility API tree builder — snapshotApp/snapshotFocusedWindow/findElement/performAction/getFocusedElementValue"
       :struct "AXManager"
-      :capabilities (snapshot-app snapshot-focused-window find-element find-elements perform-action get-focused-element-value)
+      :capabilities (snapshot-app snapshot-focused-window find-element find-elements perform-action get-focused-element-value find-pid)
       :limits (max-depth 10 default-depth 5)
-      :note "getFocusedElementValue: reads kAXValueAttribute of focused UI element — used by typeInFocusedField for AX-first input verification")
+      :note "getFocusedElementValue: reads kAXValueAttribute of focused UI element — used by typeInFocusedField for AX-first input verification"
+      :app-discovery (
+        :primary "NSWorkspace.shared.runningApplications (reliable in MCP child process context)"
+        :fallback "NSRunningApplication.runningApplications(withBundleIdentifier:)"
+        :reason "MCP child processes have different process context — NSRunningApplication direct lookup may fail"))
 
     (component vision-ocr
       :target "Sources/MacAutoBridge/Perception/VisionOCR.swift"
@@ -48,6 +56,8 @@
       :struct "OCRManager"
       :capabilities (capture-and-recognize find-text-on-screen recognize-text select-best-window)
       :languages ("zh-Hans" "zh-Hant" "en-US")
+      :recognition-level ".fast (was .accurate — changed for speed on complex UIs like 剪映)"
+      :language-correction false
       :coordinate-transform "window-local → screen-global with Retina scaling + per-display origin offset"
       :window-selection (
         :method "selectBestWindow — private helper replacing .first(where:)"
@@ -77,9 +87,18 @@
 
     (component focus-manager
       :target "Sources/MacAutoBridge/Action/FocusManager.swift"
-      :doc "App focus acquisition/verification/release — 2s timeout, 100ms poll"
+      :doc "App focus acquisition/verification/release — 4s timeout, aggressive strategy"
       :struct "FocusManager"
       :capabilities (focus-app acquire verify release list-windows current-bundle-id)
+      :focus-strategy (
+        :stage-1 "NSRunningApplication.activate(.activateIgnoringOtherApps) — 2s timeout"
+        :stage-2 "AppleScript 'tell application id ... to activate' — 2s additional"
+        :total-timeout "4s"
+        :reason "activate() alone can't beat Chrome holding focus in real-world testing")
+      :window-title-verify (
+        :primary "AX focused window title"
+        :fallback "CGWindowList title matching"
+        :reason "System modals (save/open panels) return nil AX title — CGWindowList catches these")
       :window-filter (
         :when "bundleID == nil (list all windows)"
         :rules (layer-must-be-0 min-size-50px skip-system-bundles)
@@ -88,7 +107,8 @@
           "com.apple.notificationcenterui"
           "com.apple.WindowManager"
           "com.apple.dock"
-          "com.apple.SystemUIServer")))
+          "com.apple.SystemUIServer"))
+      :list-windows-discovery "PID→bundleID map from NSWorkspace + stderr diagnostics"))
 
     (component event-synthesizer
       :target "Sources/MacAutoBridge/Action/EventSynthesizer.swift"
@@ -119,11 +139,11 @@
   ;; ── Pillar 4: State Facade (MVP Convenience) ──────────────
 
   (pillar facade
-    :purpose "4 high-level methods — simplified API for common automation patterns"
+    :purpose "6 high-level methods — simplified API for common automation patterns"
 
     (component mvp-facade
       :target "Sources/MacAutoBridge/Transaction/MVPFacade.swift"
-      :doc "focus-and-assert / capture-app / click-text / type-in-focused-field"
+      :doc "focus-and-assert / capture-app / click-text / type-in-focused-field / snapshot / goto-folder"
       :struct "MVPFacade"
       :methods (
         (focus-and-assert :doc "Activate app + optional window title verify")
@@ -136,7 +156,18 @@
               :note "Exact, no false positives — works for native text fields")
             (stage-2 :method "OCR fallback (findTextOnScreen)" :delay "+200ms" :priority fallback
               :note "For non-standard fields: web views, canvas, custom inputs"))
-          :error-detail "checked AX value + OCR" ))))
+          :error-detail "checked AX value + OCR")
+        (snapshot
+          :doc "Composite: windows + focused AX tree + optional OCR in ONE call"
+          :params ((bundle_id String :required) (include_ocr Boolean :default false))
+          :returns "{ windows[], ax_tree, ocr_entries[]? }"
+          :impact "−60% tool calls for observation workflows"
+          :note "Default fast mode (no OCR) — OCR adds significant latency on complex UIs")
+        (goto-folder
+          :doc "Composite: Cmd+Shift+G → type path → Enter in ONE call"
+          :params ((bundle_id String :required) (path String :required))
+          :impact "−60% tool calls for file dialog navigation"
+          :note "Designed for 剪映/Finder Go-To-Folder dialogs"))))
 
   ;; ── Pillar 5: Server (MCP JSON-RPC 2.0) ───────────────────
 
@@ -151,17 +182,18 @@
 
     (component tool-registry
       :target "Sources/MacAutoBridge/Server/ToolRegistry.swift"
-      :doc "15 tool definitions + dispatch logic"
+      :doc "18 tool definitions + dispatch logic"
       :struct "ToolRegistry"
-      :tool-count 15
+      :tool-count 18
       :json-output "prettyPrinted + sortedKeys — JSONSerialization options for LLM readability"))
 
   ;; ── Entry Point ────────────────────────────────────────────
 
   (component entry
     :target "Sources/MacAutoBridge/main.swift"
-    :doc "Detached stdin reader → async JSON-RPC loop + RunLoop.main.run()"
-    :threading "stdin on detached thread, AppKit/AX/CGEvent on main")
+    :doc "Detached stdin reader → async JSON-RPC loop + RunLoop.main.run() + stderr logging"
+    :threading "stdin on detached thread, AppKit/AX/CGEvent on main"
+    :stderr-logging "Startup diagnostics: pid, parent_pid, NSWorkspace app count, CGWindowList count, AX trusted")
 
   ;; ── Shared Types ───────────────────────────────────────────
 
@@ -189,7 +221,7 @@
   ;; ── MCP Tools (15 total) ───────────────────────────────────
 
   (tools
-    :doc "15 MCP tools exposed via JSON-RPC 2.0"
+    :doc "18 MCP tools exposed via JSON-RPC 2.0"
 
     ;; Perception (6)
     (tool focus_app :category perception :focus-lock acquire
@@ -224,7 +256,7 @@
                (ax_exists_role String) (ax_exists_title String)
                (window_appears String) (timeout Float)))
 
-    ;; MVP Facade (4)
+    ;; MVP Facade (6)
     (tool focus_and_assert :category mvp :focus-lock none
       :params ((bundle_id String :required) (window_title String)))
     (tool capture_app :category mvp :focus-lock none
@@ -232,7 +264,17 @@
     (tool click_text :category mvp :focus-lock acquire-release
       :params ((bundle_id String :required) (text String :required) (nth Integer)))
     (tool type_in_focused_field :category mvp :focus-lock acquire-release
-      :params ((bundle_id String :required) (text String :required) (verify Boolean))))
+      :params ((bundle_id String :required) (text String :required) (verify Boolean)))
+    (tool snapshot :category mvp :focus-lock none
+      :params ((bundle_id String :required) (include_ocr Boolean :default false))
+      :doc "Composite: windows + AX tree + optional OCR in one call")
+    (tool goto_folder :category mvp :focus-lock acquire-release
+      :params ((bundle_id String :required) (path String :required))
+      :doc "Composite: Cmd+Shift+G → type path → Enter")
+
+    ;; Diagnostic (1)
+    (tool diagnose :category diagnostic :focus-lock none
+      :doc "Debug tool: reports pid, parent_pid, NSWorkspace app count, CGWindowList count, AX trusted status"))
 
   ;; ── System Requirements ────────────────────────────────────
 
