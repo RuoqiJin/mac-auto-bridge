@@ -82,12 +82,17 @@ final class AXManager: @unchecked Sendable {
     // MARK: - Private
 
     private func findPID(bundleID: String) throws -> pid_t {
-        guard
-            let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
-        else {
-            throw BridgeError.appNotRunning(bundleID)
+        // Primary: NSWorkspace (more reliable for MCP child processes)
+        if let app = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == bundleID
+        }) {
+            return app.processIdentifier
         }
-        return app.processIdentifier
+        // Fallback: direct API
+        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+            return app.processIdentifier
+        }
+        throw BridgeError.appNotRunning(bundleID)
     }
 
     private func buildTree(element: AXUIElement, depth: Int, maxDepth: Int) -> AXNode {

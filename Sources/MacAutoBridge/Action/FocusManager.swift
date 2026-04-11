@@ -11,9 +11,12 @@ final class FocusManager: @unchecked Sendable {
     // MARK: - Focus
 
     func focusApp(bundleID: String) async throws -> Bool {
-        guard
-            let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
-        else {
+        // Use NSWorkspace as primary — more reliable when running as MCP child process
+        let app = NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier == bundleID
+        } ?? NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
+
+        guard let app else {
             throw BridgeError.appNotRunning(bundleID)
         }
         app.activate()
@@ -78,12 +81,25 @@ final class FocusManager: @unchecked Sendable {
     ]
 
     func listWindows(bundleID: String?) -> [WindowInfo] {
+        // Build PID→bundleID map from NSWorkspace (reliable for child processes)
+        var pidMap: [Int32: String] = [:]
+        for app in NSWorkspace.shared.runningApplications {
+            if let bid = app.bundleIdentifier {
+                pidMap[app.processIdentifier] = bid
+            }
+        }
+
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard
             let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
         else {
+            fputs("[MacAutoBridge] CGWindowListCopyWindowInfo returned nil\n", stderr)
             return []
         }
+
+        fputs(
+            "[MacAutoBridge] CGWindowList raw: \(windowList.count), pidMap: \(pidMap.count) apps\n",
+            stderr)
 
         return windowList.compactMap { info in
             guard let windowID = info[kCGWindowNumber as String] as? UInt32,
@@ -92,8 +108,11 @@ final class FocusManager: @unchecked Sendable {
 
             let layer = info[kCGWindowLayer as String] as? Int ?? 0
             let pid = info[kCGWindowOwnerPID as String] as? Int32
-            let ownerBundle =
-                pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
+
+            // Resolve bundle ID: NSWorkspace map first, then per-process lookup
+            let ownerBundle: String? =
+                pid.flatMap { pidMap[$0] }
+                ?? pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
 
             // Filter: specific bundle requested
             if let bid = bundleID, ownerBundle != bid { return nil }

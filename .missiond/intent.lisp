@@ -1,11 +1,13 @@
 ;; ============================================================
 ;; MacAutoBridge — Intent Declaration
-;; Generated: 2026-04-11 | Forge Deep Cartography v3
+;; Generated: 2026-04-11 | Updated: 2026-04-11 | Forge Deep Cartography v3
 ;; ============================================================
 ;; State-aware macOS GUI Automation MCP Server
 ;; Pure Swift, zero external dependencies
 ;; 5-pillar architecture: Perception / Action / Transaction / Facade / Server
 ;; macOS 14+ | Swift 5.10+ | MCP JSON-RPC 2.0 over stdio
+;; cc997cc: 5 real-world fixes — WindowRanker / multi-display OCR / WindowFilter /
+;;          AX-value verification / pretty-printed JSON
 
 (intent mac-auto-bridge
   (granularity L3-implementation)
@@ -34,18 +36,27 @@
 
     (component ax-observer
       :target "Sources/MacAutoBridge/Perception/AXObserver.swift"
-      :doc "Accessibility API tree builder — snapshotApp/snapshotFocusedWindow/findElement/performAction"
+      :doc "Accessibility API tree builder — snapshotApp/snapshotFocusedWindow/findElement/performAction/getFocusedElementValue"
       :struct "AXManager"
-      :capabilities (snapshot-app snapshot-focused-window find-element find-elements perform-action)
-      :limits (max-depth 10 default-depth 5))
+      :capabilities (snapshot-app snapshot-focused-window find-element find-elements perform-action get-focused-element-value)
+      :limits (max-depth 10 default-depth 5)
+      :note "getFocusedElementValue: reads kAXValueAttribute of focused UI element — used by typeInFocusedField for AX-first input verification")
 
     (component vision-ocr
       :target "Sources/MacAutoBridge/Perception/VisionOCR.swift"
-      :doc "Vision Framework OCR + ScreenCaptureKit window capture"
+      :doc "Vision Framework OCR + ScreenCaptureKit window/display capture"
       :struct "OCRManager"
-      :capabilities (capture-and-recognize find-text-on-screen recognize-text)
+      :capabilities (capture-and-recognize find-text-on-screen recognize-text select-best-window)
       :languages ("zh-Hans" "zh-Hant" "en-US")
-      :coordinate-transform "window-local → screen-global with Retina scaling")
+      :coordinate-transform "window-local → screen-global with Retina scaling + per-display origin offset"
+      :window-selection (
+        :method "selectBestWindow — private helper replacing .first(where:)"
+        :filters (on-screen-only layer-0-only min-size-50px)
+        :rank "title match first, then largest area (width×height)")
+      :multi-display (
+        :behavior "findTextOnScreen scans ALL displays in content.displays, not just first"
+        :transform "displayBounds.origin + entry.frame/scale for each display"
+        :failure-mode "skip display on capture error, aggregate results across all"))
 
     (component hybrid-locator
       :target "Sources/MacAutoBridge/Perception/HybridLocator.swift"
@@ -68,7 +79,16 @@
       :target "Sources/MacAutoBridge/Action/FocusManager.swift"
       :doc "App focus acquisition/verification/release — 2s timeout, 100ms poll"
       :struct "FocusManager"
-      :capabilities (focus-app acquire verify release list-windows current-bundle-id))
+      :capabilities (focus-app acquire verify release list-windows current-bundle-id)
+      :window-filter (
+        :when "bundleID == nil (list all windows)"
+        :rules (layer-must-be-0 min-size-50px skip-system-bundles)
+        :system-bundles-blocked (
+          "com.apple.controlcenter"
+          "com.apple.notificationcenterui"
+          "com.apple.WindowManager"
+          "com.apple.dock"
+          "com.apple.SystemUIServer")))
 
     (component event-synthesizer
       :target "Sources/MacAutoBridge/Action/EventSynthesizer.swift"
@@ -109,7 +129,14 @@
         (focus-and-assert :doc "Activate app + optional window title verify")
         (capture-app :doc "Screenshot + OCR → {width, height, entries[]}")
         (click-text :doc "OCR-find text → click center → verify focus")
-        (type-in-focused-field :doc "Type into focused field → optional OCR verify"))))
+        (type-in-focused-field
+          :doc "Type into focused field → two-stage verification"
+          :verification-strategy (
+            (stage-1 :method "AX value (getFocusedElementValue)" :delay "300ms" :priority primary
+              :note "Exact, no false positives — works for native text fields")
+            (stage-2 :method "OCR fallback (findTextOnScreen)" :delay "+200ms" :priority fallback
+              :note "For non-standard fields: web views, canvas, custom inputs"))
+          :error-detail "checked AX value + OCR" ))))
 
   ;; ── Pillar 5: Server (MCP JSON-RPC 2.0) ───────────────────
 
@@ -126,7 +153,8 @@
       :target "Sources/MacAutoBridge/Server/ToolRegistry.swift"
       :doc "15 tool definitions + dispatch logic"
       :struct "ToolRegistry"
-      :tool-count 15))
+      :tool-count 15
+      :json-output "prettyPrinted + sortedKeys — JSONSerialization options for LLM readability"))
 
   ;; ── Entry Point ────────────────────────────────────────────
 
