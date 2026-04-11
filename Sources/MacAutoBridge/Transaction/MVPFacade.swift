@@ -105,23 +105,49 @@ final class MVPFacade: @unchecked Sendable {
     }
 
     /// Watch screen for a progress indicator (e.g. "%") to disappear.
-    /// Polls OCR every 2 seconds. Returns snapshot when done — agent can act immediately.
+    /// Two-phase: first waits for the indicator to APPEAR, then waits for it to DISAPPEAR.
+    /// This prevents false-positive early returns when the progress hasn't started yet.
+    /// Returns snapshot when done — agent can act immediately.
     func watchProgress(bundleID: String, disappears: String, timeout: TimeInterval) async throws
         -> [String: Any]
     {
         let deadline = Date().addingTimeInterval(timeout)
 
+        // Phase 1: Wait for indicator to APPEAR (max 15s, then assume it appeared and we missed it)
+        let appearDeadline = Date().addingTimeInterval(min(15, timeout / 2))
+        var seen = false
+        while Date() < appearDeadline {
+            let entries = try await ocr.findTextOnScreen(text: disappears, bundleID: bundleID)
+            if !entries.isEmpty {
+                seen = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)  // 1s poll during appear phase
+        }
+
+        // Phase 2: Wait for indicator to DISAPPEAR
+        // If never seen in phase 1, still wait — it may have appeared and vanished between polls
+        var consecutiveGone = 0
         while Date() < deadline {
             let entries = try await ocr.findTextOnScreen(text: disappears, bundleID: bundleID)
             if entries.isEmpty {
-                // Progress gone — return snapshot for immediate next action
-                return try await snapshot(bundleID: bundleID, includeOCR: true)
+                consecutiveGone += 1
+                // Require 2 consecutive "gone" checks to avoid OCR flicker
+                if consecutiveGone >= 2 || (seen && consecutiveGone >= 1) {
+                    return try await snapshot(bundleID: bundleID, includeOCR: true)
+                }
+            } else {
+                seen = true
+                consecutiveGone = 0
             }
-            // Poll every 2s (OCR is expensive on complex UIs like video editors)
-            try await Task.sleep(nanoseconds: 2_000_000_000)
+            try await Task.sleep(nanoseconds: 2_000_000_000)  // 2s poll
         }
 
-        throw BridgeError.timeout(timeout)
+        // Timeout — return snapshot anyway so agent can see current state
+        var result = try await snapshot(bundleID: bundleID, includeOCR: true)
+        result["timeout"] = true
+        result["indicator_was_seen"] = seen
+        return result
     }
 
     /// Capture window screenshot and save to file. Returns the file path.
@@ -206,6 +232,7 @@ final class MVPFacade: @unchecked Sendable {
     }
 
     /// Scroll in a direction until target text appears (or max scrolls reached).
+    /// Long search terms are auto-shortened (e.g. "pcea-talk-ep104-yoha.mp3" → "ep104").
     /// Returns the found OCR entry on success. Throws on timeout.
     func scrollUntilText(
         bundleID: String, text: String, direction: String, maxScrolls: Int,
@@ -214,8 +241,10 @@ final class MVPFacade: @unchecked Sendable {
         _ = try await focus.acquire(bundleID: bundleID)
         defer { focus.release() }
 
+        // Auto-shorten long search terms — OCR often breaks long filenames across lines
+        let searchText = shortenForOCR(text)
+
         let delta: Int32 = direction == "up" ? -80 : 80
-        // Default scroll position: center of the largest window
         let windows = focus.listWindows(bundleID: bundleID)
         let scrollPoint: CGPoint
         if let x = scrollX, let y = scrollY {
@@ -229,8 +258,7 @@ final class MVPFacade: @unchecked Sendable {
         }
 
         for attempt in 1...maxScrolls {
-            // Check if text is already visible
-            let entries = try await ocr.findTextOnScreen(text: text, bundleID: bundleID)
+            let entries = try await ocr.findTextOnScreen(text: searchText, bundleID: bundleID)
             if !entries.isEmpty {
                 return [
                     "found": true,
@@ -239,13 +267,12 @@ final class MVPFacade: @unchecked Sendable {
                 ]
             }
 
-            // Scroll and wait for UI update
             try events.scroll(at: scrollPoint, deltaY: delta)
-            try await Task.sleep(nanoseconds: 400_000_000)  // 400ms between scrolls
+            try await Task.sleep(nanoseconds: 400_000_000)
         }
 
         // Final check after last scroll
-        let entries = try await ocr.findTextOnScreen(text: text, bundleID: bundleID)
+        let entries = try await ocr.findTextOnScreen(text: searchText, bundleID: bundleID)
         if !entries.isEmpty {
             return [
                 "found": true,
@@ -257,5 +284,37 @@ final class MVPFacade: @unchecked Sendable {
         throw BridgeError.verificationFailed(
             step: "scroll_until_text",
             detail: "'\(text)' not found after \(maxScrolls) scrolls \(direction)")
+    }
+
+    // MARK: - Private Helpers
+
+    /// Shorten long text for OCR matching. OCR often breaks long filenames across lines.
+    /// "pcea-talk-ep104-yoha.mp3" → "ep104" (extract episode-like pattern)
+    /// "some,keywords" → passed through (already multi-keyword)
+    /// Short text (≤15 chars) → passed through unchanged
+    private func shortenForOCR(_ text: String) -> String {
+        // Already multi-keyword — pass through
+        if text.contains(",") { return text }
+        // Short enough for reliable OCR match
+        if text.count <= 15 { return text }
+
+        // Try to extract episode/number patterns like "ep104", "EP42", "ep181"
+        let nsText = text as NSString
+        let regex = try? NSRegularExpression(pattern: "[eE][pP]\\d+", options: [])
+        if let match = regex?.firstMatch(
+            in: text, range: NSRange(location: 0, length: nsText.length))
+        {
+            return nsText.substring(with: match.range)
+        }
+
+        // Fallback: take the most distinctive segment (split by - . _ space, pick longest)
+        let segments = text.components(separatedBy: CharacterSet(charactersIn: "-._/ "))
+            .filter { $0.count >= 3 }
+        if let best = segments.max(by: { $0.count < $1.count }), best.count <= 20 {
+            return best
+        }
+
+        // Last resort: first 12 chars
+        return String(text.prefix(12))
     }
 }
