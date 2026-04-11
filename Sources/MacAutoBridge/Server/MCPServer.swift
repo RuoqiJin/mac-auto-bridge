@@ -5,7 +5,7 @@ final class MCPServer: @unchecked Sendable {
     private let registry = ToolRegistry()
 
     init() {
-        fputs("[MacAutoBridge] MCP server ready on stdio\n", stderr)
+        log("MCPServer initialized")
     }
 
     func handleLine(_ line: String) async {
@@ -16,13 +16,13 @@ final class MCPServer: @unchecked Sendable {
             if let response = try await processMessage(trimmed) {
                 let data = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])
                 if let jsonString = String(data: data, encoding: .utf8) {
+                    log("stdout >> \(jsonString.prefix(200))")
                     print(jsonString)
                     fflush(stdout)
                 }
             }
         } catch {
-            fputs("[MacAutoBridge] Error: \(error)\n", stderr)
-            // Try to return JSON-RPC error if we can extract the request id
+            log("ERROR: \(error)")
             if let data = trimmed.data(using: .utf8),
                 let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                 let id = json["id"]

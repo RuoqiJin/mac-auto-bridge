@@ -11,7 +11,6 @@ final class FocusManager: @unchecked Sendable {
     // MARK: - Focus
 
     func focusApp(bundleID: String) async throws -> Bool {
-        // Use NSWorkspace as primary — more reliable when running as MCP child process
         let app = NSWorkspace.shared.runningApplications.first {
             $0.bundleIdentifier == bundleID
         } ?? NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
@@ -19,14 +18,28 @@ final class FocusManager: @unchecked Sendable {
         guard let app else {
             throw BridgeError.appNotRunning(bundleID)
         }
+
+        // Strategy 1: direct activation
         app.activate()
 
         for _ in 0..<20 {
-            try await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+            try await Task.sleep(nanoseconds: 100_000_000)
             if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID {
                 return true
             }
         }
+
+        // Strategy 2: AppleScript (more forceful — beats other apps holding focus)
+        let script = NSAppleScript(source: "tell application id \"\(bundleID)\" to activate")
+        script?.executeAndReturnError(nil)
+
+        for _ in 0..<20 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID {
+                return true
+            }
+        }
+
         return false
     }
 
@@ -36,12 +49,23 @@ final class FocusManager: @unchecked Sendable {
         }
 
         if let title = expectedWindowTitle {
-            if let window = try? AXManager.shared.snapshotFocusedWindow(bundleID: bundleID) {
-                guard window.title?.contains(title) == true else {
-                    throw BridgeError.focusLost(
-                        expected: "\(bundleID) / \(title)",
-                        actual: "\(bundleID) / \(window.title ?? "nil")")
-                }
+            // Strategy 1: AX focused window title
+            if let window = try? AXManager.shared.snapshotFocusedWindow(bundleID: bundleID),
+                let axTitle = window.title, axTitle.contains(title)
+            {
+                // AX title matches — good
+            }
+            // Strategy 2: CGWindowList title (fallback for system modals where AX title = nil)
+            else if listWindows(bundleID: bundleID).contains(where: {
+                $0.title?.contains(title) == true
+            }) {
+                // CGWindowList has a matching window — accept
+            } else {
+                let axTitle =
+                    (try? AXManager.shared.snapshotFocusedWindow(bundleID: bundleID))?.title
+                throw BridgeError.focusLost(
+                    expected: "\(bundleID) / \(title)",
+                    actual: "\(bundleID) / \(axTitle ?? "nil")")
             }
         }
 
