@@ -1,3 +1,4 @@
+@preconcurrency import AppKit
 import CoreGraphics
 import Foundation
 
@@ -57,6 +58,66 @@ final class MVPFacade: @unchecked Sendable {
                 throw BridgeError.verificationFailed(
                     step: "type_in_focused_field",
                     detail: "Text '\(verify)' not found after typing (checked AX value + OCR)")
+            }
+        }
+
+        return true
+    }
+
+    // MARK: - High-Level Workflows
+
+    /// Snapshot: one call returns window list + focused window AX tree + OCR text.
+    /// Eliminates the capture_app → ax_snapshot → list_windows triple-call pattern.
+    func snapshot(bundleID: String) async throws -> [String: Any] {
+        let windows = focus.listWindows(bundleID: bundleID)
+        let axTree: AXNode? = try? AXManager.shared.snapshotFocusedWindow(
+            bundleID: bundleID, maxDepth: 3)
+        let ocrResult: (CGImage, [OCRTextEntry])? = try? await ocr.captureAndRecognize(
+            bundleID: bundleID)
+
+        var result: [String: Any] = [:]
+        result["windows"] = windows.map { $0.toJSON() }
+        result["window_count"] = windows.count
+
+        if let ax = axTree {
+            result["focused_window_ax"] = ax.toJSON()
+        }
+
+        if let (image, entries) = ocrResult {
+            result["ocr_width"] = image.width
+            result["ocr_height"] = image.height
+            result["ocr_entries"] = entries.map { $0.toJSON() }
+            result["ocr_entry_count"] = entries.count
+        }
+
+        return result
+    }
+
+    /// Navigate to a folder in a macOS file dialog (Open/Save panel).
+    /// Sends Cmd+Shift+G → types path → presses Enter twice.
+    func gotoFolder(bundleID: String, path: String) async throws -> Bool {
+        _ = try await focus.acquire(bundleID: bundleID)
+        defer { focus.release() }
+
+        // Cmd+Shift+G = "Go to Folder" in macOS file dialogs
+        try events.pressKey(keyCode: 5, flags: [.maskCommand, .maskShift])  // 5 = 'G'
+        try await Task.sleep(nanoseconds: 500_000_000)  // 500ms for sheet to appear
+
+        // Type the path
+        try events.typeText(path)
+        try await Task.sleep(nanoseconds: 300_000_000)  // 300ms for autocomplete
+
+        // Press Enter to confirm path, then Enter again to navigate
+        try events.pressKey(keyCode: 36)  // Return
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        // Verify via OCR that something related to the path appears
+        let pathTail = (path as NSString).lastPathComponent
+        if !pathTail.isEmpty {
+            let entries = try await ocr.findTextOnScreen(text: pathTail, bundleID: bundleID)
+            if entries.isEmpty {
+                throw BridgeError.verificationFailed(
+                    step: "goto_folder", detail: "'\(pathTail)' not found after navigation")
             }
         }
 

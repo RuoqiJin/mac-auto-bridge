@@ -169,6 +169,24 @@ final class ToolRegistry: @unchecked Sendable {
                 ],
                 required: ["bundle_id", "text"]),
 
+            // ── High-Level Workflows ──
+            tool(
+                "snapshot",
+                desc:
+                    "All-in-one observation: returns window list + focused window AX tree (depth 3) + OCR text entries in a single call. Use this instead of calling list_windows + ax_snapshot + capture_app separately.",
+                props: ["bundle_id": str("App bundle identifier")],
+                required: ["bundle_id"]),
+
+            tool(
+                "goto_folder",
+                desc:
+                    "Navigate to a folder in a macOS file dialog (Open/Save panel). Sends Cmd+Shift+G, types the path, and presses Enter. Verifies the folder name appears after navigation.",
+                props: [
+                    "bundle_id": str("App bundle identifier"),
+                    "path": str("Absolute path to navigate to, e.g. /Users/jinchen/Downloads/pcea-audio"),
+                ],
+                required: ["bundle_id", "path"]),
+
             // ── Diagnostics ──
             tool(
                 "diagnose",
@@ -314,6 +332,17 @@ final class ToolRegistry: @unchecked Sendable {
             let ok = try await mvp.typeInFocusedField(
                 bundleID: bid, text: text, verifyText: verify)
             return textResult("Typed \(text.count) chars", isError: !ok)
+
+        case "snapshot":
+            let bid = args["bundle_id"] as! String
+            let result = try await mvp.snapshot(bundleID: bid)
+            return jsonResult(result)
+
+        case "goto_folder":
+            let bid = args["bundle_id"] as! String
+            let path = args["path"] as! String
+            let ok = try await mvp.gotoFolder(bundleID: bid, path: path)
+            return textResult("Navigated to \(path)", isError: !ok)
 
         case "diagnose":
             return jsonResult(runDiagnostics())
