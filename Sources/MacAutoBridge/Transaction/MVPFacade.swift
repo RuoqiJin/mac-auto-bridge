@@ -65,6 +65,65 @@ final class MVPFacade: @unchecked Sendable {
         return true
     }
 
+    /// Right-click target → wait for context menu → click menu item. One call replaces 3-4.
+    func contextMenuClick(bundleID: String, targetText: String?, targetX: Double?, targetY: Double?,
+                          menuItem: String, nth: Int = 1) async throws -> Bool {
+        _ = try await focus.acquire(bundleID: bundleID)
+        defer { focus.release() }
+
+        // Step 1: Right-click on target
+        let point: CGPoint
+        if let text = targetText {
+            let rect = try await locator.resolve(locator: .ocr(text), bundleID: bundleID, nth: nth)
+            point = rectCenter(rect)
+        } else if let x = targetX, let y = targetY {
+            point = CGPoint(x: x, y: y)
+        } else {
+            throw BridgeError.elementNotFound("context_menu_click requires target_text or x/y")
+        }
+        try events.click(at: point, button: .right)
+
+        // Step 2: Wait for context menu to appear
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        // Step 3: Click menu item — AX first (reliable), OCR fallback
+        let query = AXQuery(role: "AXMenuItem", title: menuItem)
+        if let node = try? AXManager.shared.findElement(bundleID: bundleID, query: query),
+           node.frame != .zero {
+            try events.click(at: rectCenter(node.frame))
+            return true
+        }
+
+        // OCR fallback for non-standard menus
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let entries = try await ocr.findTextOnScreen(text: menuItem, bundleID: bundleID)
+        guard let entry = entries.first else {
+            throw BridgeError.elementNotFound("Menu item '\(menuItem)' not found in context menu")
+        }
+        try events.click(at: rectCenter(entry.frame))
+        return true
+    }
+
+    /// Watch screen for a progress indicator (e.g. "%") to disappear.
+    /// Polls OCR every 2 seconds. Returns snapshot when done — agent can act immediately.
+    func watchProgress(bundleID: String, disappears: String, timeout: TimeInterval) async throws
+        -> [String: Any]
+    {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            let entries = try await ocr.findTextOnScreen(text: disappears, bundleID: bundleID)
+            if entries.isEmpty {
+                // Progress gone — return snapshot for immediate next action
+                return try await snapshot(bundleID: bundleID, includeOCR: true)
+            }
+            // Poll every 2s (OCR is expensive on complex UIs like video editors)
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+
+        throw BridgeError.timeout(timeout)
+    }
+
     /// Capture window screenshot and save to file. Returns the file path.
     /// For agents with image viewing capability (Codex view_image).
     func captureToFile(bundleID: String, windowTitle: String?, filePath: String?) async throws

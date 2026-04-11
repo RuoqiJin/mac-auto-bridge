@@ -220,6 +220,31 @@ final class ToolRegistry: @unchecked Sendable {
                 required: ["bundle_id"]),
 
             tool(
+                "context_menu_click",
+                desc:
+                    "Right-click on target, wait for context menu, then click a menu item. Replaces the 3-step pattern: right_click → snapshot → click(menu_item). Use for 剪映 '识别字幕/歌词' etc.",
+                props: [
+                    "bundle_id": str("App bundle identifier"),
+                    "target_text": str("Right-click on this text (OCR)"),
+                    "x": num("Right-click at X coordinate"),
+                    "y": num("Right-click at Y coordinate"),
+                    "menu_item": str("Menu item text to click, e.g. '识别字幕/歌词'"),
+                    "nth": int("Which occurrence of target_text (default 1)"),
+                ],
+                required: ["bundle_id", "menu_item"]),
+
+            tool(
+                "watch_progress",
+                desc:
+                    "Watch screen until a progress indicator disappears (e.g. '%' during speech recognition). Polls OCR every 2 seconds. Returns snapshot when done — agent can act immediately without a separate snapshot call. Use this instead of 'sleep 45' for waiting on recognition/export/rendering.",
+                props: [
+                    "bundle_id": str("App bundle identifier"),
+                    "disappears": str("Text that should disappear, e.g. '%' for progress bars"),
+                    "timeout": num("Max wait time in seconds (default 120)"),
+                ],
+                required: ["bundle_id", "disappears"]),
+
+            tool(
                 "scroll_until_text",
                 desc:
                     "Scroll in a direction until target text appears on screen. Supports comma-separated keywords. Returns matched entries on success, throws on timeout.",
@@ -434,6 +459,26 @@ final class ToolRegistry: @unchecked Sendable {
             let bid = args["bundle_id"] as! String
             let includeOCR = args["include_ocr"] as? Bool ?? false
             let result = try await mvp.snapshot(bundleID: bid, includeOCR: includeOCR)
+            return jsonResult(result)
+
+        case "context_menu_click":
+            let bid = args["bundle_id"] as! String
+            let menuItem = args["menu_item"] as! String
+            let nth = args["nth"] as? Int ?? 1
+            let ok = try await mvp.contextMenuClick(
+                bundleID: bid,
+                targetText: args["target_text"] as? String,
+                targetX: args["x"] as? Double,
+                targetY: args["y"] as? Double,
+                menuItem: menuItem, nth: nth)
+            return textResult("Context menu '\(menuItem)' clicked", isError: !ok)
+
+        case "watch_progress":
+            let bid = args["bundle_id"] as! String
+            let disappears = args["disappears"] as! String
+            let timeout = args["timeout"] as? Double ?? 120.0
+            let result = try await mvp.watchProgress(
+                bundleID: bid, disappears: disappears, timeout: timeout)
             return jsonResult(result)
 
         case "scroll_until_text":
