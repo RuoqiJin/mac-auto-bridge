@@ -82,7 +82,9 @@ final class MVPFacade: @unchecked Sendable {
         }
 
         if includeOCR {
-            if let (image, entries) = try? await ocr.captureAndRecognize(bundleID: bundleID) {
+            if let (image, entries) = try? await ocr.captureAndRecognize(
+                bundleID: bundleID, fast: true)
+            {
                 result["ocr_width"] = image.width
                 result["ocr_height"] = image.height
                 result["ocr_entries"] = entries.map { $0.toJSON() }

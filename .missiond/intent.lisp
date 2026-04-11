@@ -108,7 +108,7 @@
           "com.apple.WindowManager"
           "com.apple.dock"
           "com.apple.SystemUIServer"))
-      :list-windows-discovery "PID→bundleID map from NSWorkspace + stderr diagnostics"))
+      :list-windows-discovery "PID→bundleID map from NSWorkspace + stderr diagnostics")
 
     (component event-synthesizer
       :target "Sources/MacAutoBridge/Action/EventSynthesizer.swift"

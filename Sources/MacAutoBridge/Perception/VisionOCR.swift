@@ -9,9 +9,9 @@ final class OCRManager: @unchecked Sendable {
 
     // MARK: - Capture + OCR
 
-    func captureAndRecognize(bundleID: String, windowTitle: String? = nil) async throws -> (
-        CGImage, [OCRTextEntry]
-    ) {
+    func captureAndRecognize(bundleID: String, windowTitle: String? = nil, fast: Bool = false)
+        async throws -> (CGImage, [OCRTextEntry])
+    {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
 
@@ -33,7 +33,7 @@ final class OCRManager: @unchecked Sendable {
 
         let image = try await SCScreenshotManager.captureImage(
             contentFilter: filter, configuration: config)
-        let rawEntries = try recognizeText(in: image)
+        let rawEntries = try recognizeText(in: image, fast: fast)
 
         // Convert OCR pixel coords → screen-global coords
         let screenEntries = rawEntries.map { entry in
@@ -104,9 +104,9 @@ final class OCRManager: @unchecked Sendable {
 
     // MARK: - OCR Engine
 
-    func recognizeText(in image: CGImage) throws -> [OCRTextEntry] {
+    func recognizeText(in image: CGImage, fast: Bool = false) throws -> [OCRTextEntry] {
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .fast
+        request.recognitionLevel = fast ? .fast : .accurate
         request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en"]
         request.usesLanguageCorrection = false
 
