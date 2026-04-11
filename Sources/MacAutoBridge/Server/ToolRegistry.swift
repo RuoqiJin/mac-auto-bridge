@@ -59,6 +59,17 @@ final class ToolRegistry: @unchecked Sendable {
                 required: ["bundle_id"]),
 
             tool(
+                "capture_to_file",
+                desc:
+                    "Capture a window screenshot and save as PNG file. Returns the file path. Use this when the agent has image viewing capability (e.g. Codex view_image) and needs to SEE the actual screen, not just OCR text.",
+                props: [
+                    "bundle_id": str("App bundle identifier"),
+                    "window_title": str("Optional: window title substring"),
+                    "file_path": str("Optional: output file path (default: /tmp/mac-auto-bridge-capture-{timestamp}.png)"),
+                ],
+                required: ["bundle_id"]),
+
+            tool(
                 "find_text_on_screen",
                 desc:
                     "Find text on screen via OCR. Supports multiple comma-separated keywords (e.g. 'srt,字幕,subtitle') — matches ANY keyword. Returns all matching entries with coordinates.",
@@ -278,6 +289,14 @@ final class ToolRegistry: @unchecked Sendable {
                 "width": image.width, "height": image.height,
                 "text_entries": entries.map { $0.toJSON() },
             ] as [String: Any])
+
+        case "capture_to_file":
+            let bid = args["bundle_id"] as! String
+            let title = args["window_title"] as? String
+            let filePath = args["file_path"] as? String
+            let path = try await mvp.captureToFile(
+                bundleID: bid, windowTitle: title, filePath: filePath)
+            return textResult("Saved to \(path)")
 
         case "find_text_on_screen":
             let text = args["text"] as! String

@@ -1,6 +1,7 @@
 @preconcurrency import AppKit
 import CoreGraphics
 import Foundation
+import ImageIO
 
 final class MVPFacade: @unchecked Sendable {
 
@@ -62,6 +63,25 @@ final class MVPFacade: @unchecked Sendable {
         }
 
         return true
+    }
+
+    /// Capture window screenshot and save to file. Returns the file path.
+    /// For agents with image viewing capability (Codex view_image).
+    func captureToFile(bundleID: String, windowTitle: String?, filePath: String?) async throws
+        -> String
+    {
+        let (image, _) = try await ocr.captureAndRecognize(bundleID: bundleID, windowTitle: windowTitle)
+
+        let path = filePath ?? "/tmp/mac-auto-bridge-capture-\(Int(Date().timeIntervalSince1970)).png"
+        let url = URL(fileURLWithPath: path)
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {
+            throw BridgeError.elementNotFound("Cannot create image file at \(path)")
+        }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else {
+            throw BridgeError.elementNotFound("Failed to write image to \(path)")
+        }
+        return path
     }
 
     // MARK: - High-Level Workflows
