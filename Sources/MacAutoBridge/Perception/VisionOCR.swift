@@ -16,11 +16,8 @@ final class OCRManager: @unchecked Sendable {
             false, onScreenWindowsOnly: true)
 
         guard
-            let window = content.windows.first(where: { w in
-                guard w.owningApplication?.bundleIdentifier == bundleID else { return false }
-                if let title = windowTitle { return w.title?.contains(title) == true }
-                return true
-            })
+            let window = selectBestWindow(
+                from: content.windows, bundleID: bundleID, windowTitle: windowTitle)
         else {
             throw BridgeError.elementNotFound("Window for \(bundleID)")
         }
@@ -61,38 +58,48 @@ final class OCRManager: @unchecked Sendable {
             return entries.filter { $0.text.localizedCaseInsensitiveContains(text) }
         }
 
-        // Full-screen capture
+        // Scan ALL displays — critical for multi-monitor setups
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first else {
+        guard !content.displays.isEmpty else {
             throw BridgeError.screenCaptureDenied
         }
 
-        let scale = DisplayManager.shared.scaleFor(display: display.displayID)
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let config = SCStreamConfiguration()
-        config.width = display.width * Int(scale)
-        config.height = display.height * Int(scale)
-        config.showsCursor = false
+        var allEntries: [OCRTextEntry] = []
 
-        let image = try await SCScreenshotManager.captureImage(
-            contentFilter: filter, configuration: config)
-        let rawEntries = try recognizeText(in: image)
+        for display in content.displays {
+            let scale = DisplayManager.shared.scaleFor(display: display.displayID)
+            let displayBounds = CGDisplayBounds(display.displayID)
 
-        let screenEntries = rawEntries.map { entry in
-            OCRTextEntry(
-                text: entry.text,
-                frame: CGRect(
-                    x: entry.frame.origin.x / scale,
-                    y: entry.frame.origin.y / scale,
-                    width: entry.frame.width / scale,
-                    height: entry.frame.height / scale
-                ),
-                confidence: entry.confidence
-            )
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let config = SCStreamConfiguration()
+            config.width = display.width * Int(scale)
+            config.height = display.height * Int(scale)
+            config.showsCursor = false
+
+            guard
+                let image = try? await SCScreenshotManager.captureImage(
+                    contentFilter: filter, configuration: config)
+            else { continue }
+
+            let rawEntries = (try? recognizeText(in: image)) ?? []
+
+            let screenEntries = rawEntries.map { entry in
+                OCRTextEntry(
+                    text: entry.text,
+                    frame: CGRect(
+                        x: displayBounds.origin.x + entry.frame.origin.x / scale,
+                        y: displayBounds.origin.y + entry.frame.origin.y / scale,
+                        width: entry.frame.width / scale,
+                        height: entry.frame.height / scale
+                    ),
+                    confidence: entry.confidence
+                )
+            }
+            allEntries.append(contentsOf: screenEntries)
         }
 
-        return screenEntries.filter { $0.text.localizedCaseInsensitiveContains(text) }
+        return allEntries.filter { $0.text.localizedCaseInsensitiveContains(text) }
     }
 
     // MARK: - OCR Engine
@@ -131,5 +138,30 @@ final class OCRManager: @unchecked Sendable {
             return DisplayManager.shared.scaleFor(display: displayID)
         }
         return 2.0
+    }
+
+    /// Rank windows: title match > largest area. Filters out non-normal layers and tiny windows.
+    private func selectBestWindow(
+        from windows: [SCWindow], bundleID: String, windowTitle: String?
+    ) -> SCWindow? {
+        let candidates = windows.filter { w in
+            guard w.owningApplication?.bundleIdentifier == bundleID else { return false }
+            guard w.isOnScreen else { return false }
+            guard w.windowLayer == 0 else { return false }
+            guard w.frame.width > 50 && w.frame.height > 50 else { return false }
+            return true
+        }
+
+        // Title match takes priority
+        if let title = windowTitle,
+            let match = candidates.first(where: { $0.title?.contains(title) == true })
+        {
+            return match
+        }
+
+        // Largest on-screen window = main window
+        return candidates.max(by: {
+            ($0.frame.width * $0.frame.height) < ($1.frame.width * $1.frame.height)
+        })
     }
 }

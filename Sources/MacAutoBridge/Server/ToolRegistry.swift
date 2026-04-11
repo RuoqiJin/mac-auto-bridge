@@ -335,7 +335,9 @@ final class ToolRegistry: @unchecked Sendable {
     }
 
     private func jsonResult(_ value: Any) -> [String: Any] {
-        let data = (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data()
+        let data =
+            (try? JSONSerialization.data(
+                withJSONObject: value, options: [.prettyPrinted, .sortedKeys])) ?? Data()
         let text = String(data: data, encoding: .utf8) ?? "null"
         return ["content": [["type": "text", "text": text]]]
     }

@@ -69,6 +69,14 @@ final class FocusManager: @unchecked Sendable {
 
     // MARK: - Window Listing
 
+    private static let systemBundles: Set<String> = [
+        "com.apple.controlcenter",
+        "com.apple.notificationcenterui",
+        "com.apple.WindowManager",
+        "com.apple.dock",
+        "com.apple.SystemUIServer",
+    ]
+
     func listWindows(bundleID: String?) -> [WindowInfo] {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard
@@ -82,17 +90,28 @@ final class FocusManager: @unchecked Sendable {
                 let bounds = info[kCGWindowBounds as String] as? [String: Any]
             else { return nil }
 
+            let layer = info[kCGWindowLayer as String] as? Int ?? 0
             let pid = info[kCGWindowOwnerPID as String] as? Int32
             let ownerBundle =
                 pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
 
+            // Filter: specific bundle requested
             if let bid = bundleID, ownerBundle != bid { return nil }
+
+            let w = bounds["Width"] as? CGFloat ?? 0
+            let h = bounds["Height"] as? CGFloat ?? 0
+
+            // Filter: skip noise when listing all windows
+            if bundleID == nil {
+                if layer != 0 { return nil }
+                if let ob = ownerBundle, Self.systemBundles.contains(ob) { return nil }
+                if w < 50 || h < 50 { return nil }
+            }
 
             let frame = CGRect(
                 x: bounds["X"] as? CGFloat ?? 0,
                 y: bounds["Y"] as? CGFloat ?? 0,
-                width: bounds["Width"] as? CGFloat ?? 0,
-                height: bounds["Height"] as? CGFloat ?? 0
+                width: w, height: h
             )
 
             return WindowInfo(

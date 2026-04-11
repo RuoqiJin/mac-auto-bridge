@@ -50,6 +50,21 @@ final class AXManager: @unchecked Sendable {
         return results
     }
 
+    // MARK: - Focused Element Value (for input verification)
+
+    func getFocusedElementValue(bundleID: String) throws -> String? {
+        let pid = try findPID(bundleID: bundleID)
+        let appElement = AXUIElementCreateApplication(pid)
+
+        var focusedRef: AnyObject?
+        let result = AXUIElementCopyAttributeValue(
+            appElement, kAXFocusedUIElementAttribute as CFString, &focusedRef)
+        guard result == .success, let focused = focusedRef else { return nil }
+
+        // swiftlint:disable:next force_cast
+        return getAttribute(focused as! AXUIElement, kAXValueAttribute) as? String
+    }
+
     // MARK: - AX Actions
 
     func performAction(bundleID: String, query: AXQuery, action: String = "AXPress") throws -> Bool {

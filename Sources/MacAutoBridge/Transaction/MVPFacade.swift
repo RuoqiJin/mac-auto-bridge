@@ -30,7 +30,8 @@ final class MVPFacade: @unchecked Sendable {
         return true
     }
 
-    /// MVP #4 — Type in focused field with optional post-verification
+    /// MVP #4 — Type in focused field with optional post-verification.
+    /// Verification strategy: AX value first (exact), OCR fallback (visual).
     func typeInFocusedField(bundleID: String, text: String, verifyText: String?) async throws
         -> Bool
     {
@@ -40,12 +41,22 @@ final class MVPFacade: @unchecked Sendable {
         try events.typeText(text)
 
         if let verify = verifyText {
-            try await Task.sleep(nanoseconds: 500_000_000)  // 500ms
+            try await Task.sleep(nanoseconds: 300_000_000)  // 300ms for UI update
+
+            // Strategy 1: AX focused element value — most reliable, no false positives
+            if let value = try? AXManager.shared.getFocusedElementValue(bundleID: bundleID),
+                value.contains(verify)
+            {
+                return true
+            }
+
+            // Strategy 2: OCR fallback — for non-standard text fields (e.g. web views, canvas)
+            try await Task.sleep(nanoseconds: 200_000_000)  // +200ms
             let entries = try await ocr.findTextOnScreen(text: verify, bundleID: bundleID)
             guard !entries.isEmpty else {
                 throw BridgeError.verificationFailed(
                     step: "type_in_focused_field",
-                    detail: "Text '\(verify)' not found after typing")
+                    detail: "Text '\(verify)' not found after typing (checked AX value + OCR)")
             }
         }
 
