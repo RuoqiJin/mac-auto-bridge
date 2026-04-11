@@ -52,10 +52,17 @@ final class OCRManager: @unchecked Sendable {
         return (image, screenEntries)
     }
 
+    /// Search for one or more keywords. Pass comma-separated terms to match any.
     func findTextOnScreen(text: String, bundleID: String? = nil) async throws -> [OCRTextEntry] {
+        let keywords = text.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespaces)
+        }
+
         if let bid = bundleID {
             let (_, entries) = try await captureAndRecognize(bundleID: bid)
-            return entries.filter { $0.text.localizedCaseInsensitiveContains(text) }
+            return entries.filter { entry in
+                keywords.contains { entry.text.localizedCaseInsensitiveContains($0) }
+            }
         }
 
         // Scan ALL displays — critical for multi-monitor setups
@@ -99,7 +106,9 @@ final class OCRManager: @unchecked Sendable {
             allEntries.append(contentsOf: screenEntries)
         }
 
-        return allEntries.filter { $0.text.localizedCaseInsensitiveContains(text) }
+        return allEntries.filter { entry in
+            keywords.contains { entry.text.localizedCaseInsensitiveContains($0) }
+        }
     }
 
     // MARK: - OCR Engine

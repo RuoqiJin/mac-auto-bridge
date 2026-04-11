@@ -125,4 +125,58 @@ final class MVPFacade: @unchecked Sendable {
 
         return true
     }
+
+    /// Scroll in a direction until target text appears (or max scrolls reached).
+    /// Returns the found OCR entry on success. Throws on timeout.
+    func scrollUntilText(
+        bundleID: String, text: String, direction: String, maxScrolls: Int,
+        scrollX: Double?, scrollY: Double?
+    ) async throws -> [String: Any] {
+        _ = try await focus.acquire(bundleID: bundleID)
+        defer { focus.release() }
+
+        let delta: Int32 = direction == "up" ? -80 : 80
+        // Default scroll position: center of the largest window
+        let windows = focus.listWindows(bundleID: bundleID)
+        let scrollPoint: CGPoint
+        if let x = scrollX, let y = scrollY {
+            scrollPoint = CGPoint(x: x, y: y)
+        } else if let main = windows.max(by: {
+            ($0.frame.width * $0.frame.height) < ($1.frame.width * $1.frame.height)
+        }) {
+            scrollPoint = CGPoint(x: main.frame.midX, y: main.frame.midY)
+        } else {
+            scrollPoint = .zero
+        }
+
+        for attempt in 1...maxScrolls {
+            // Check if text is already visible
+            let entries = try await ocr.findTextOnScreen(text: text, bundleID: bundleID)
+            if !entries.isEmpty {
+                return [
+                    "found": true,
+                    "attempts": attempt - 1,
+                    "entries": entries.map { $0.toJSON() },
+                ]
+            }
+
+            // Scroll and wait for UI update
+            try events.scroll(at: scrollPoint, deltaY: delta)
+            try await Task.sleep(nanoseconds: 400_000_000)  // 400ms between scrolls
+        }
+
+        // Final check after last scroll
+        let entries = try await ocr.findTextOnScreen(text: text, bundleID: bundleID)
+        if !entries.isEmpty {
+            return [
+                "found": true,
+                "attempts": maxScrolls,
+                "entries": entries.map { $0.toJSON() },
+            ]
+        }
+
+        throw BridgeError.verificationFailed(
+            step: "scroll_until_text",
+            detail: "'\(text)' not found after \(maxScrolls) scrolls \(direction)")
+    }
 }

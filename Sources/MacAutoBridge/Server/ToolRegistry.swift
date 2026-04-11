@@ -60,9 +60,11 @@ final class ToolRegistry: @unchecked Sendable {
 
             tool(
                 "find_text_on_screen",
-                desc: "Find text on screen via OCR, returns matching entries with coordinates",
+                desc:
+                    "Find text on screen via OCR. Supports multiple comma-separated keywords (e.g. 'srt,字幕,subtitle') — matches ANY keyword. Returns all matching entries with coordinates.",
                 props: [
-                    "text": str("Text to search for"),
+                    "text": str(
+                        "Text to search for. Comma-separated for multi-keyword: 'srt,字幕,export'"),
                     "bundle_id": str("Optional: limit search to this app's windows"),
                 ],
                 required: ["text"]),
@@ -205,6 +207,21 @@ final class ToolRegistry: @unchecked Sendable {
                     "include_ocr": bool("Include OCR text entries (slower, default false)"),
                 ],
                 required: ["bundle_id"]),
+
+            tool(
+                "scroll_until_text",
+                desc:
+                    "Scroll in a direction until target text appears on screen. Supports comma-separated keywords. Returns matched entries on success, throws on timeout.",
+                props: [
+                    "bundle_id": str("App bundle identifier"),
+                    "text": str(
+                        "Text to find. Comma-separated for multi-keyword: 'srt,字幕,subtitle'"),
+                    "direction": str("Scroll direction: 'down' or 'up' (default 'down')"),
+                    "max_scrolls": int("Maximum scroll attempts (default 10)"),
+                    "scroll_x": num("Optional: X coordinate to scroll at"),
+                    "scroll_y": num("Optional: Y coordinate to scroll at"),
+                ],
+                required: ["bundle_id", "text"]),
 
             tool(
                 "goto_folder",
@@ -398,6 +415,18 @@ final class ToolRegistry: @unchecked Sendable {
             let bid = args["bundle_id"] as! String
             let includeOCR = args["include_ocr"] as? Bool ?? false
             let result = try await mvp.snapshot(bundleID: bid, includeOCR: includeOCR)
+            return jsonResult(result)
+
+        case "scroll_until_text":
+            let bid = args["bundle_id"] as! String
+            let text = args["text"] as! String
+            let direction = args["direction"] as? String ?? "down"
+            let maxScrolls = args["max_scrolls"] as? Int ?? 10
+            let scrollX = args["scroll_x"] as? Double
+            let scrollY = args["scroll_y"] as? Double
+            let result = try await mvp.scrollUntilText(
+                bundleID: bid, text: text, direction: direction,
+                maxScrolls: maxScrolls, scrollX: scrollX, scrollY: scrollY)
             return jsonResult(result)
 
         case "goto_folder":
