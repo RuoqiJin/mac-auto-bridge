@@ -12,6 +12,15 @@ final class OCRManager: @unchecked Sendable {
     func captureAndRecognize(bundleID: String, windowTitle: String? = nil, fast: Bool = false)
         async throws -> (CGImage, [OCRTextEntry])
     {
+        try await CaptureSerializer.shared.run(timeout: fast ? 8 : 15) { [self] in
+            try await self._captureAndRecognize(
+                bundleID: bundleID, windowTitle: windowTitle, fast: fast)
+        }
+    }
+
+    private func _captureAndRecognize(
+        bundleID: String, windowTitle: String? = nil, fast: Bool = false
+    ) async throws -> (CGImage, [OCRTextEntry]) {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
 
@@ -100,6 +109,13 @@ final class OCRManager: @unchecked Sendable {
 
     /// Capture only — NO OCR at all. For capture_to_file where we just need the image.
     func captureOnly(bundleID: String, windowTitle: String? = nil) async throws -> CGImage {
+        try await CaptureSerializer.shared.run(timeout: 8) { [self] in
+            try await self._captureOnly(bundleID: bundleID, windowTitle: windowTitle)
+        }
+    }
+
+    private func _captureOnly(bundleID: String, windowTitle: String? = nil) async throws -> CGImage
+    {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
 
@@ -208,15 +224,25 @@ final class OCRManager: @unchecked Sendable {
 
     /// Search for one or more keywords. Pass comma-separated terms to match any.
     func findTextOnScreen(text: String, bundleID: String? = nil) async throws -> [OCRTextEntry] {
-        let keywords = text.split(separator: ",").map {
-            $0.trimmingCharacters(in: .whitespaces)
-        }
-
+        // Per-app path delegates to captureAndRecognize which is already serialized.
         if let bid = bundleID {
+            let keywords = text.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
             let (_, entries) = try await captureAndRecognize(bundleID: bid)
             return entries.filter { entry in
                 keywords.contains { entry.text.localizedCaseInsensitiveContains($0) }
             }
+        }
+        // Multi-display scan: serialized as a single unit so it doesn't interleave.
+        return try await CaptureSerializer.shared.run(timeout: 20) { [self] in
+            try await self._findTextOnScreenAllDisplays(text: text)
+        }
+    }
+
+    private func _findTextOnScreenAllDisplays(text: String) async throws -> [OCRTextEntry] {
+        let keywords = text.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespaces)
         }
 
         // Scan ALL displays — critical for multi-monitor setups

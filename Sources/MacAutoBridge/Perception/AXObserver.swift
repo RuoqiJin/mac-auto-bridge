@@ -50,6 +50,61 @@ final class AXManager: @unchecked Sendable {
         return results
     }
 
+    // MARK: - Selection (semantic alternative to visual selection inspection)
+
+    /// Returns all elements currently marked as selected in the focused window.
+    /// Walks the focused window subtree and collects elements where AXSelected==true,
+    /// AXSelectedChildren is non-empty, or AXSelectedRows is non-empty.
+    /// Use this instead of staring at a screenshot to decide whether items are selected.
+    func getSelection(bundleID: String) throws -> [AXNode] {
+        let pid = try findPID(bundleID: bundleID)
+        let appElement = AXUIElementCreateApplication(pid)
+
+        var windowValue: AnyObject?
+        let result = AXUIElementCopyAttributeValue(
+            appElement, kAXFocusedWindowAttribute as CFString, &windowValue)
+        guard result == .success, let window = windowValue else {
+            throw BridgeError.elementNotFound("No focused window for \(bundleID)")
+        }
+
+        var results: [AXNode] = []
+        // swiftlint:disable:next force_cast
+        collectSelected(element: window as! AXUIElement, depth: 0, maxDepth: 10, results: &results)
+        return results
+    }
+
+    private func collectSelected(
+        element: AXUIElement, depth: Int, maxDepth: Int, results: inout [AXNode]
+    ) {
+        if let selected = getAttribute(element, "AXSelected") as? Bool, selected {
+            results.append(makeLeaf(element))
+        }
+        // Containers expose AXSelectedChildren / AXSelectedRows directly.
+        for attr in ["AXSelectedChildren", "AXSelectedRows", "AXSelectedCells"] {
+            if let children = getAttribute(element, attr) as? [AXUIElement] {
+                for c in children {
+                    results.append(makeLeaf(c))
+                }
+            }
+        }
+        guard depth < maxDepth,
+            let children = getAttribute(element, kAXChildrenAttribute) as? [AXUIElement]
+        else { return }
+        for c in children {
+            collectSelected(element: c, depth: depth + 1, maxDepth: maxDepth, results: &results)
+        }
+    }
+
+    private func makeLeaf(_ element: AXUIElement) -> AXNode {
+        let role = getAttribute(element, kAXRoleAttribute) as? String ?? "Unknown"
+        let subrole = getAttribute(element, kAXSubroleAttribute) as? String
+        let title = getAttribute(element, kAXTitleAttribute) as? String
+        let identifier = getAttribute(element, kAXIdentifierAttribute) as? String
+        return AXNode(
+            role: role, subrole: subrole, title: title,
+            identifier: identifier, frame: getFrame(element), children: [])
+    }
+
     // MARK: - Focused Element Value (for input verification)
 
     func getFocusedElementValue(bundleID: String) throws -> String? {

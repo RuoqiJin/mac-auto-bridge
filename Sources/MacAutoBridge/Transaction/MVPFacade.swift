@@ -106,47 +106,67 @@ final class MVPFacade: @unchecked Sendable {
 
     /// Watch screen for a progress indicator (e.g. "%") to disappear.
     /// Two-phase: first waits for the indicator to APPEAR, then waits for it to DISAPPEAR.
-    /// This prevents false-positive early returns when the progress hasn't started yet.
-    /// Returns snapshot when done — agent can act immediately.
+    ///
+    /// **CRITICAL**: The Codex MCP client kills any tool call after 120s. This function
+    /// caps internal blocking at 90s to stay safely below that. If the indicator is still
+    /// visible at 90s, it returns `still_running: true` (NOT an error) so the caller knows
+    /// to call again — never interpret a result with `still_running: true` as a failed task.
     func watchProgress(bundleID: String, disappears: String, timeout: TimeInterval) async throws
         -> [String: Any]
     {
-        let deadline = Date().addingTimeInterval(timeout)
+        // Hard ceiling: stay well below Codex MCP 120s call timeout.
+        let cappedTimeout = min(timeout, 90)
+        let deadline = Date().addingTimeInterval(cappedTimeout)
 
-        // Phase 1: Wait for indicator to APPEAR (max 15s, then assume it appeared and we missed it)
-        let appearDeadline = Date().addingTimeInterval(min(15, timeout / 2))
+        // Phase 1: Wait for indicator to APPEAR (max 12s of the budget, never more than half).
+        let appearBudget = min(12, cappedTimeout / 2)
+        let appearDeadline = Date().addingTimeInterval(appearBudget)
         var seen = false
+        var lastSampleEmpty = false
         while Date() < appearDeadline {
             let entries = try await ocr.findTextOnScreen(text: disappears, bundleID: bundleID)
             if !entries.isEmpty {
                 seen = true
                 break
             }
-            try await Task.sleep(nanoseconds: 1_000_000_000)  // 1s poll during appear phase
+            lastSampleEmpty = true
+            try await Task.sleep(nanoseconds: 1_000_000_000)
         }
 
-        // Phase 2: Wait for indicator to DISAPPEAR
-        // If never seen in phase 1, still wait — it may have appeared and vanished between polls
+        // Phase 2: Wait for indicator to DISAPPEAR.
         var consecutiveGone = 0
+        var lastNonEmptyText: String? = nil
         while Date() < deadline {
             let entries = try await ocr.findTextOnScreen(text: disappears, bundleID: bundleID)
             if entries.isEmpty {
                 consecutiveGone += 1
-                // Require 2 consecutive "gone" checks to avoid OCR flicker
                 if consecutiveGone >= 2 || (seen && consecutiveGone >= 1) {
-                    return try await snapshot(bundleID: bundleID, includeOCR: true)
+                    var result = try await snapshot(bundleID: bundleID, includeOCR: true)
+                    result["done"] = true
+                    result["indicator_was_seen"] = seen
+                    return result
                 }
             } else {
                 seen = true
                 consecutiveGone = 0
+                lastNonEmptyText = entries.first?.text
             }
-            try await Task.sleep(nanoseconds: 2_000_000_000)  // 2s poll
+            try await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        // Timeout — return snapshot anyway so agent can see current state
-        var result = try await snapshot(bundleID: bundleID, includeOCR: true)
-        result["timeout"] = true
-        result["indicator_was_seen"] = seen
+        // Soft timeout: still in progress. Return state without throwing so the
+        // caller doesn't misinterpret this as a failed task and re-trigger the action.
+        var result: [String: Any] = [
+            "still_running": true,
+            "indicator_was_seen": seen,
+            "elapsed_seconds": Int(cappedTimeout),
+            "last_indicator_sample": lastNonEmptyText as Any,
+            "phase": seen ? "waiting_for_disappear" : (lastSampleEmpty ? "never_appeared" : "appearing"),
+            "advice": "Indicator still visible after \(Int(cappedTimeout))s. Call watch_progress again to keep waiting — DO NOT re-trigger the original action.",
+        ]
+        if let snap = try? await snapshot(bundleID: bundleID, includeOCR: false) {
+            result["snapshot"] = snap
+        }
         return result
     }
 

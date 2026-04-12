@@ -49,6 +49,13 @@ final class ToolRegistry: @unchecked Sendable {
                 required: ["bundle_id"]),
 
             tool(
+                "get_selection",
+                desc:
+                    "Read which elements are currently SELECTED in the focused window via Accessibility API. Use this INSTEAD of squinting at a screenshot to decide whether items are selected — works for timeline clips, list rows, table cells, multi-selection, etc. Returns selected elements with role/title/frame.",
+                props: ["bundle_id": str("App bundle identifier")],
+                required: ["bundle_id"]),
+
+            tool(
                 "capture_window",
                 desc:
                     "Capture a window screenshot and run OCR, returns text entries with screen-global coordinates",
@@ -236,11 +243,11 @@ final class ToolRegistry: @unchecked Sendable {
             tool(
                 "watch_progress",
                 desc:
-                    "Watch screen until a progress indicator disappears (e.g. '%' during speech recognition). Polls OCR every 2 seconds. Returns snapshot when done — agent can act immediately without a separate snapshot call. Use this instead of 'sleep 45' for waiting on recognition/export/rendering.",
+                    "Watch screen until a progress indicator disappears (e.g. '%' during speech recognition). Polls OCR every 2 seconds. INTERNAL CAP IS 90 SECONDS — Codex MCP client kills any tool call after 120s, so this tool returns early with `still_running: true` (NOT an error) if the indicator is still visible at 90s. CRITICAL: when you see `still_running: true`, simply call watch_progress AGAIN to keep waiting; NEVER re-trigger the original action (e.g. don't right-click + click 识别字幕 a second time). Result keys: `done` (finished), `still_running` (call again), `indicator_was_seen`, `phase`, `last_indicator_sample`, `snapshot`.",
                 props: [
                     "bundle_id": str("App bundle identifier"),
                     "disappears": str("Text that should disappear, e.g. '%' for progress bars"),
-                    "timeout": num("Max wait time in seconds (default 120)"),
+                    "timeout": num("Max wait time in seconds (default 90, hard cap 90)"),
                 ],
                 required: ["bundle_id", "disappears"]),
 
@@ -304,6 +311,14 @@ final class ToolRegistry: @unchecked Sendable {
             let depth = args["max_depth"] as? Int ?? 5
             let tree = try ax.snapshotFocusedWindow(bundleID: bid, maxDepth: depth)
             return jsonResult(tree.toJSON())
+
+        case "get_selection":
+            let bid = args["bundle_id"] as! String
+            let selected = try ax.getSelection(bundleID: bid)
+            return jsonResult([
+                "count": selected.count,
+                "selected": selected.map { $0.toJSON() },
+            ] as [String: Any])
 
         case "capture_window":
             let bid = args["bundle_id"] as! String
