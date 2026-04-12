@@ -154,7 +154,7 @@ final class ToolRegistry: @unchecked Sendable {
             tool(
                 "right_click",
                 desc:
-                    "Right-click at a target to open context menu. Supports OCR text or coordinates.",
+                    "Right-click at a target to open a context menu. Supports OCR text or coordinates. Returns {clicked_at, menu_appeared, menu_items, menu_item_count} — `menu_appeared` is checked via Accessibility API after the click, so you do NOT need a screenshot to verify the right-click worked. If menu_appeared=false, the click missed; retry at a different point or use AX-locator.",
                 props: [
                     "bundle_id": str("App bundle identifier for focus lock"),
                     "target_text": str("Right-click on this text (found via OCR)"),
@@ -227,14 +227,29 @@ final class ToolRegistry: @unchecked Sendable {
                 required: ["bundle_id"]),
 
             tool(
-                "context_menu_click",
+                "look",
                 desc:
-                    "Right-click on target, wait for context menu, then click a menu item. Replaces the 3-step pattern: right_click → snapshot → click(menu_item). Use for 剪映 '识别字幕/歌词' etc.",
+                    "PREFERRED 'see the screen' tool. Single call returns: PNG file path (pass to view_image), AX tree, and OCR entries. REPLACES the capture_to_file + snapshot(include_ocr=true) + view_image triple-call pattern — use this instead. Returns: file_path, image_width, image_height, ax_tree, ocr_entries (when include_ocr=true), ocr_count.",
                 props: [
                     "bundle_id": str("App bundle identifier"),
-                    "target_text": str("Right-click on this text (OCR)"),
-                    "x": num("Right-click at X coordinate"),
-                    "y": num("Right-click at Y coordinate"),
+                    "file_path": str(
+                        "Optional: output PNG path (default: /tmp/mac-auto-bridge-look-{ts}.png)"),
+                    "include_ocr": bool("Include OCR text entries (default true)"),
+                ],
+                required: ["bundle_id"]),
+
+            tool(
+                "context_menu_click",
+                desc:
+                    "Right-click on a target, wait for context menu, then click a menu item. Replaces the 3-step right_click → snapshot → click pattern. Target priority: AX query (~300ms, fastest) → OCR text (~1.5s) → raw x/y. PREFER target_ax_* params when the target is a known AX element — they are 5x faster than OCR.",
+                props: [
+                    "bundle_id": str("App bundle identifier"),
+                    "target_ax_role": str("AX role of right-click target (preferred, fastest)"),
+                    "target_ax_title": str("AX title of right-click target"),
+                    "target_ax_id": str("AX identifier of right-click target"),
+                    "target_text": str("Right-click on this text (OCR fallback)"),
+                    "x": num("Right-click at X coordinate (last resort)"),
+                    "y": num("Right-click at Y coordinate (last resort)"),
                     "menu_item": str("Menu item text to click, e.g. '识别字幕/歌词'"),
                     "nth": int("Which occurrence of target_text (default 1)"),
                 ],
@@ -243,11 +258,11 @@ final class ToolRegistry: @unchecked Sendable {
             tool(
                 "watch_progress",
                 desc:
-                    "Watch screen until a progress indicator disappears (e.g. '%' during speech recognition). Polls OCR every 2 seconds. INTERNAL CAP IS 90 SECONDS — Codex MCP client kills any tool call after 120s, so this tool returns early with `still_running: true` (NOT an error) if the indicator is still visible at 90s. CRITICAL: when you see `still_running: true`, simply call watch_progress AGAIN to keep waiting; NEVER re-trigger the original action (e.g. don't right-click + click 识别字幕 a second time). Result keys: `done` (finished), `still_running` (call again), `indicator_was_seen`, `phase`, `last_indicator_sample`, `snapshot`.",
+                    "Watch screen until a progress indicator disappears (e.g. '%' during speech recognition). Polls OCR every 2 seconds. INTERNAL CAP IS 110 SECONDS — Codex MCP client kills tool calls at 120s, so this returns early before that. STALL DETECTION: tracks last 4 OCR samples; if all identical (e.g. '45%' frozen for ~8s) returns `stalled:true` — this is the ONLY legitimate cancel signal. Result keys: `done` (finished, act now), `stalled` (frozen, OK to cancel and retry), `still_running` without stalled (changing, KEEP WAITING by calling again — DO NOT re-trigger the original action). Other keys: `indicator_was_seen`, `last_progress_text`, `last_indicator_sample`, `stall_samples`, `phase`, `snapshot`.",
                 props: [
                     "bundle_id": str("App bundle identifier"),
                     "disappears": str("Text that should disappear, e.g. '%' for progress bars"),
-                    "timeout": num("Max wait time in seconds (default 90, hard cap 90)"),
+                    "timeout": num("Max wait time in seconds (default 110, hard cap 110)"),
                 ],
                 required: ["bundle_id", "disappears"]),
 
@@ -419,7 +434,21 @@ final class ToolRegistry: @unchecked Sendable {
                 point = CGPoint(x: x, y: y)
             }
             try events.click(at: point, button: .right)
-            return textResult("Right-clicked at (\(Int(point.x)), \(Int(point.y)))")
+
+            // Probe AX for a context menu so the agent doesn't need to screenshot
+            // to verify the right-click landed. Wait up to ~400ms for menu to appear.
+            var menuItems: [String] = []
+            for _ in 0..<8 {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                menuItems = ax.detectContextMenu(bundleID: bid)
+                if !menuItems.isEmpty { break }
+            }
+            return jsonResult([
+                "clicked_at": [Int(point.x), Int(point.y)] as [Int],
+                "menu_appeared": !menuItems.isEmpty,
+                "menu_items": menuItems,
+                "menu_item_count": menuItems.count,
+            ] as [String: Any])
 
         // ── Transaction ──
 
@@ -476,6 +505,14 @@ final class ToolRegistry: @unchecked Sendable {
             let result = try await mvp.snapshot(bundleID: bid, includeOCR: includeOCR)
             return jsonResult(result)
 
+        case "look":
+            let bid = args["bundle_id"] as! String
+            let filePath = args["file_path"] as? String
+            let includeOCR = args["include_ocr"] as? Bool ?? true
+            let result = try await mvp.look(
+                bundleID: bid, filePath: filePath, includeOCR: includeOCR)
+            return jsonResult(result)
+
         case "context_menu_click":
             let bid = args["bundle_id"] as! String
             let menuItem = args["menu_item"] as! String
@@ -485,6 +522,9 @@ final class ToolRegistry: @unchecked Sendable {
                 targetText: args["target_text"] as? String,
                 targetX: args["x"] as? Double,
                 targetY: args["y"] as? Double,
+                targetAxRole: args["target_ax_role"] as? String,
+                targetAxTitle: args["target_ax_title"] as? String,
+                targetAxId: args["target_ax_id"] as? String,
                 menuItem: menuItem, nth: nth)
             return textResult("Context menu '\(menuItem)' clicked", isError: !ok)
 

@@ -66,20 +66,41 @@ final class MVPFacade: @unchecked Sendable {
     }
 
     /// Right-click target → wait for context menu → click menu item. One call replaces 3-4.
-    func contextMenuClick(bundleID: String, targetText: String?, targetX: Double?, targetY: Double?,
-                          menuItem: String, nth: Int = 1) async throws -> Bool {
+    /// Target priority: AX query (fastest, ~300ms) → OCR text → raw coordinates.
+    func contextMenuClick(
+        bundleID: String,
+        targetText: String?,
+        targetX: Double?,
+        targetY: Double?,
+        targetAxRole: String?,
+        targetAxTitle: String?,
+        targetAxId: String?,
+        menuItem: String,
+        nth: Int = 1
+    ) async throws -> Bool {
         _ = try await focus.acquire(bundleID: bundleID)
         defer { focus.release() }
 
-        // Step 1: Right-click on target
+        // Step 1: Resolve right-click point. AX first (cheapest), then OCR, then raw coords.
         let point: CGPoint
-        if let text = targetText {
-            let rect = try await locator.resolve(locator: .ocr(text), bundleID: bundleID, nth: nth)
+        if targetAxRole != nil || targetAxTitle != nil || targetAxId != nil {
+            let q = AXQuery(role: targetAxRole, title: targetAxTitle, identifier: targetAxId)
+            guard let node = try? AXManager.shared.findElement(bundleID: bundleID, query: q),
+                node.frame != .zero
+            else {
+                throw BridgeError.elementNotFound(
+                    "context_menu_click: AX target not found (role=\(targetAxRole ?? "*"), title=\(targetAxTitle ?? "*"), id=\(targetAxId ?? "*"))")
+            }
+            point = rectCenter(node.frame)
+        } else if let text = targetText {
+            let rect = try await locator.resolve(
+                locator: .ocr(text), bundleID: bundleID, nth: nth)
             point = rectCenter(rect)
         } else if let x = targetX, let y = targetY {
             point = CGPoint(x: x, y: y)
         } else {
-            throw BridgeError.elementNotFound("context_menu_click requires target_text or x/y")
+            throw BridgeError.elementNotFound(
+                "context_menu_click requires one of: target_ax_*, target_text, or x+y")
         }
         try events.click(at: point, button: .right)
 
@@ -108,14 +129,19 @@ final class MVPFacade: @unchecked Sendable {
     /// Two-phase: first waits for the indicator to APPEAR, then waits for it to DISAPPEAR.
     ///
     /// **CRITICAL**: The Codex MCP client kills any tool call after 120s. This function
-    /// caps internal blocking at 90s to stay safely below that. If the indicator is still
-    /// visible at 90s, it returns `still_running: true` (NOT an error) so the caller knows
+    /// caps internal blocking at 110s to stay safely below that. If the indicator is still
+    /// visible at 110s, it returns `still_running: true` (NOT an error) so the caller knows
     /// to call again — never interpret a result with `still_running: true` as a failed task.
+    ///
+    /// **Stall detection**: tracks the last 4 OCR samples of the indicator. If they are
+    /// all identical (e.g. "45%" frozen), returns early with `stalled: true` so the agent
+    /// has authorization to cancel-and-retry. Without this signal, agents tend to mistake
+    /// any still_running for "stuck" and prematurely abort working tasks.
     func watchProgress(bundleID: String, disappears: String, timeout: TimeInterval) async throws
         -> [String: Any]
     {
-        // Hard ceiling: stay well below Codex MCP 120s call timeout.
-        let cappedTimeout = min(timeout, 90)
+        // Hard ceiling: stay well below Codex MCP 120s call timeout (10s buffer).
+        let cappedTimeout = min(timeout, 110)
         let deadline = Date().addingTimeInterval(cappedTimeout)
 
         // Phase 1: Wait for indicator to APPEAR (max 12s of the budget, never more than half).
@@ -136,6 +162,9 @@ final class MVPFacade: @unchecked Sendable {
         // Phase 2: Wait for indicator to DISAPPEAR.
         var consecutiveGone = 0
         var lastNonEmptyText: String? = nil
+        // Stall tracker: rolling window of last N progress samples (full text from OCR).
+        var stallWindow: [String] = []
+        let stallWindowSize = 4  // 4 samples * 2s poll = ~8s of no change = stalled
         while Date() < deadline {
             let entries = try await ocr.findTextOnScreen(text: disappears, bundleID: bundleID)
             if entries.isEmpty {
@@ -149,23 +178,100 @@ final class MVPFacade: @unchecked Sendable {
             } else {
                 seen = true
                 consecutiveGone = 0
-                lastNonEmptyText = entries.first?.text
+                let sample = entries.first?.text ?? ""
+                lastNonEmptyText = sample
+                stallWindow.append(sample)
+                if stallWindow.count > stallWindowSize {
+                    stallWindow.removeFirst()
+                }
+                // Stall detection: window is full and every sample is identical.
+                if stallWindow.count == stallWindowSize,
+                   let first = stallWindow.first,
+                   stallWindow.allSatisfy({ $0 == first })
+                {
+                    var result: [String: Any] = [
+                        "stalled": true,
+                        "still_running": true,
+                        "indicator_was_seen": true,
+                        "last_progress_text": sample,
+                        "stall_samples": stallWindow,
+                        "advice": "Progress indicator '\(sample)' has been frozen for ~8 seconds across 4 consecutive OCR samples. The task appears stuck. You MAY cancel-and-retry now (this is the only legitimate cancel signal — without 'stalled:true', a still_running response means keep waiting).",
+                    ]
+                    if let snap = try? await snapshot(bundleID: bundleID, includeOCR: false) {
+                        result["snapshot"] = snap
+                    }
+                    return result
+                }
             }
             try await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        // Soft timeout: still in progress. Return state without throwing so the
-        // caller doesn't misinterpret this as a failed task and re-trigger the action.
+        // Soft timeout: still in progress, no stall detected. Return state without
+        // throwing so the caller doesn't misinterpret this as a failed task.
         var result: [String: Any] = [
             "still_running": true,
+            "stalled": false,
             "indicator_was_seen": seen,
             "elapsed_seconds": Int(cappedTimeout),
             "last_indicator_sample": lastNonEmptyText as Any,
             "phase": seen ? "waiting_for_disappear" : (lastSampleEmpty ? "never_appeared" : "appearing"),
-            "advice": "Indicator still visible after \(Int(cappedTimeout))s. Call watch_progress again to keep waiting — DO NOT re-trigger the original action.",
+            "advice": "Indicator still visible after \(Int(cappedTimeout))s but has been changing. Call watch_progress again to keep waiting — DO NOT re-trigger the original action. Only cancel when stalled:true.",
         ]
         if let snap = try? await snapshot(bundleID: bundleID, includeOCR: false) {
             result["snapshot"] = snap
+        }
+        return result
+    }
+
+    /// One-call observation: capture screenshot to file + AX tree + OCR entries.
+    /// Replaces the agent's typical capture_to_file + snapshot(include_ocr=true) +
+    /// view_image triple-call pattern. Returns:
+    ///   - file_path: PNG path the agent can pass to view_image
+    ///   - image_width / image_height
+    ///   - ax_tree: focused window AX tree (depth 4)
+    ///   - ocr_entries / ocr_count (only when include_ocr=true)
+    func look(bundleID: String, filePath: String?, includeOCR: Bool) async throws
+        -> [String: Any]
+    {
+        _ = try await focus.acquire(bundleID: bundleID)
+        defer { focus.release() }
+
+        let image: CGImage
+        var entries: [OCRTextEntry] = []
+        if includeOCR {
+            let (img, ocrEntries) = try await ocr.captureAndRecognize(
+                bundleID: bundleID, fast: true)
+            image = img
+            entries = ocrEntries
+        } else {
+            image = try await ocr.captureOnly(bundleID: bundleID, windowTitle: nil)
+        }
+
+        let path = filePath
+            ?? "/tmp/mac-auto-bridge-look-\(Int(Date().timeIntervalSince1970)).png"
+        let url = URL(fileURLWithPath: path)
+        guard
+            let dest = CGImageDestinationCreateWithURL(
+                url as CFURL, "public.png" as CFString, 1, nil)
+        else {
+            throw BridgeError.elementNotFound("Cannot create image file at \(path)")
+        }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else {
+            throw BridgeError.elementNotFound("Failed to write image to \(path)")
+        }
+
+        var result: [String: Any] = [
+            "file_path": path,
+            "image_width": image.width,
+            "image_height": image.height,
+        ]
+        if let ax = try? AXManager.shared.snapshotFocusedWindow(bundleID: bundleID, maxDepth: 4) {
+            result["ax_tree"] = ax.toJSON()
+        }
+        if includeOCR {
+            result["ocr_entries"] = entries.map { $0.toJSON() }
+            result["ocr_count"] = entries.count
         }
         return result
     }

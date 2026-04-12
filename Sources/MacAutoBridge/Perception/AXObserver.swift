@@ -50,6 +50,67 @@ final class AXManager: @unchecked Sendable {
         return results
     }
 
+    // MARK: - Context Menu Detection
+
+    /// Returns the titles of items in any AXMenu currently open under this app.
+    /// Used by right_click to confirm a context menu actually appeared, so the
+    /// agent doesn't have to take a screenshot just to find out.
+    /// Empty array means no menu found (caller can interpret as "right-click missed").
+    func detectContextMenu(bundleID: String) -> [String] {
+        guard let pid = try? findPID(bundleID: bundleID) else { return [] }
+        let appElement = AXUIElementCreateApplication(pid)
+
+        // Top-level menus typically appear as direct children of the application
+        // element OR (less common) as floating windows. Check both.
+        var menuTitles: [String] = []
+
+        // 1) Direct app children
+        if let children = getAttribute(appElement, kAXChildrenAttribute) as? [AXUIElement] {
+            for child in children {
+                let role = getAttribute(child, kAXRoleAttribute) as? String ?? ""
+                if role == "AXMenu" {
+                    collectMenuItemTitles(menu: child, into: &menuTitles)
+                }
+            }
+        }
+
+        // 2) Recent context menus sometimes nest one level deeper inside windows.
+        // Walk app windows shallowly looking for AXMenu children.
+        if menuTitles.isEmpty,
+            let windows = getAttribute(appElement, kAXWindowsAttribute) as? [AXUIElement]
+        {
+            for win in windows {
+                if let children = getAttribute(win, kAXChildrenAttribute) as? [AXUIElement] {
+                    for child in children {
+                        let role = getAttribute(child, kAXRoleAttribute) as? String ?? ""
+                        if role == "AXMenu" {
+                            collectMenuItemTitles(menu: child, into: &menuTitles)
+                        }
+                    }
+                }
+            }
+        }
+
+        return menuTitles
+    }
+
+    private func collectMenuItemTitles(menu: AXUIElement, into out: inout [String]) {
+        guard let items = getAttribute(menu, kAXChildrenAttribute) as? [AXUIElement] else {
+            return
+        }
+        for item in items {
+            let role = getAttribute(item, kAXRoleAttribute) as? String ?? ""
+            // AXMenuItem and AXMenuBarItem are both worth surfacing.
+            if role == "AXMenuItem" || role == "AXMenuBarItem" {
+                if let title = getAttribute(item, kAXTitleAttribute) as? String,
+                    !title.isEmpty
+                {
+                    out.append(title)
+                }
+            }
+        }
+    }
+
     // MARK: - Selection (semantic alternative to visual selection inspection)
 
     /// Returns all elements currently marked as selected in the focused window.
