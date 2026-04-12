@@ -10,6 +10,7 @@ final class EventSynthesizer: @unchecked Sendable {
     // MARK: - Mouse
 
     func click(at point: CGPoint, clicks: Int = 1, button: CGMouseButton = .left) throws {
+        focus.ensureActive()
         try focus.verify()
 
         let downType: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown
@@ -39,6 +40,7 @@ final class EventSynthesizer: @unchecked Sendable {
     }
 
     func drag(from start: CGPoint, to end: CGPoint) throws {
+        focus.ensureActive()
         try focus.verify()
 
         let down = CGEvent(
@@ -65,6 +67,7 @@ final class EventSynthesizer: @unchecked Sendable {
     }
 
     func scroll(at point: CGPoint, deltaY: Int32) throws {
+        focus.ensureActive()
         try focus.verify()
 
         // Move cursor to position
@@ -85,6 +88,7 @@ final class EventSynthesizer: @unchecked Sendable {
     // MARK: - Keyboard
 
     func typeText(_ text: String) throws {
+        focus.ensureActive()
         try focus.verify()
 
         let chars = Array(text.utf16)
@@ -111,6 +115,7 @@ final class EventSynthesizer: @unchecked Sendable {
     }
 
     func pressKey(keyCode: UInt16, flags: CGEventFlags = []) throws {
+        focus.ensureActive()
         try focus.verify()
 
         let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)

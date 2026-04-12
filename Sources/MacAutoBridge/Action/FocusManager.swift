@@ -74,6 +74,34 @@ final class FocusManager: @unchecked Sendable {
         return true
     }
 
+    /// Always re-activate the locked app, regardless of current focus state.
+    /// Called proactively before every event synthesis. No-op if no lock.
+    /// Never throws — best-effort focus grab.
+    func ensureActive() {
+        guard let expected = lockedBundleID else { return }
+
+        // Fast path: already frontmost
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == expected {
+            return
+        }
+
+        // Find and activate
+        let app = NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier == expected
+        } ?? NSRunningApplication.runningApplications(withBundleIdentifier: expected).first
+
+        guard let app else { return }
+        app.activate()
+
+        // Brief wait for activation (max 200ms)
+        for _ in 0..<10 {
+            Thread.sleep(forTimeInterval: 0.02)
+            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == expected {
+                return
+            }
+        }
+    }
+
     /// Verify focus before action. If drifted, try to re-acquire silently.
     /// Only throws if re-acquisition fails (target app no longer running).
     /// This makes action tools transparent to focus drift — agent doesn't need to manage focus.
