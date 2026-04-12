@@ -162,9 +162,6 @@ final class MVPFacade: @unchecked Sendable {
         // Phase 2: Wait for indicator to DISAPPEAR.
         var consecutiveGone = 0
         var lastNonEmptyText: String? = nil
-        // Stall tracker: rolling window of last N progress samples (full text from OCR).
-        var stallWindow: [String] = []
-        let stallWindowSize = 4  // 4 samples * 2s poll = ~8s of no change = stalled
         while Date() < deadline {
             let entries = try await ocr.findTextOnScreen(text: disappears, bundleID: bundleID)
             if entries.isEmpty {
@@ -178,44 +175,20 @@ final class MVPFacade: @unchecked Sendable {
             } else {
                 seen = true
                 consecutiveGone = 0
-                let sample = entries.first?.text ?? ""
-                lastNonEmptyText = sample
-                stallWindow.append(sample)
-                if stallWindow.count > stallWindowSize {
-                    stallWindow.removeFirst()
-                }
-                // Stall detection: window is full and every sample is identical.
-                if stallWindow.count == stallWindowSize,
-                   let first = stallWindow.first,
-                   stallWindow.allSatisfy({ $0 == first })
-                {
-                    var result: [String: Any] = [
-                        "stalled": true,
-                        "still_running": true,
-                        "indicator_was_seen": true,
-                        "last_progress_text": sample,
-                        "stall_samples": stallWindow,
-                        "advice": "Progress indicator '\(sample)' has been frozen for ~8 seconds across 4 consecutive OCR samples. The task appears stuck. You MAY cancel-and-retry now (this is the only legitimate cancel signal — without 'stalled:true', a still_running response means keep waiting).",
-                    ]
-                    if let snap = try? await snapshot(bundleID: bundleID, includeOCR: false) {
-                        result["snapshot"] = snap
-                    }
-                    return result
-                }
+                lastNonEmptyText = entries.first?.text
             }
             try await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        // Soft timeout: still in progress, no stall detected. Return state without
-        // throwing so the caller doesn't misinterpret this as a failed task.
+        // Soft timeout: indicator still visible. Return state without throwing.
+        // The agent MUST call watch_progress again — NEVER re-trigger the action.
         var result: [String: Any] = [
             "still_running": true,
-            "stalled": false,
             "indicator_was_seen": seen,
             "elapsed_seconds": Int(cappedTimeout),
             "last_indicator_sample": lastNonEmptyText as Any,
             "phase": seen ? "waiting_for_disappear" : (lastSampleEmpty ? "never_appeared" : "appearing"),
-            "advice": "Indicator still visible after \(Int(cappedTimeout))s but has been changing. Call watch_progress again to keep waiting — DO NOT re-trigger the original action. Only cancel when stalled:true.",
+            "advice": "Progress still running after \(Int(cappedTimeout))s. This is NORMAL for long tasks (e.g. subtitle recognition can stay at the same % for 30-60s). Call watch_progress again to keep waiting. DO NOT cancel or re-trigger the original action.",
         ]
         if let snap = try? await snapshot(bundleID: bundleID, includeOCR: false) {
             result["snapshot"] = snap

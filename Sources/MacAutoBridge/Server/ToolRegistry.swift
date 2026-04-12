@@ -258,7 +258,7 @@ final class ToolRegistry: @unchecked Sendable {
             tool(
                 "watch_progress",
                 desc:
-                    "Watch screen until a progress indicator disappears (e.g. '%' during speech recognition). Polls OCR every 2 seconds. INTERNAL CAP IS 110 SECONDS — Codex MCP client kills tool calls at 120s, so this returns early before that. STALL DETECTION: tracks last 4 OCR samples; if all identical (e.g. '45%' frozen for ~8s) returns `stalled:true` — this is the ONLY legitimate cancel signal. Result keys: `done` (finished, act now), `stalled` (frozen, OK to cancel and retry), `still_running` without stalled (changing, KEEP WAITING by calling again — DO NOT re-trigger the original action). Other keys: `indicator_was_seen`, `last_progress_text`, `last_indicator_sample`, `stall_samples`, `phase`, `snapshot`.",
+                    "Watch screen until a progress indicator disappears (e.g. '%' during subtitle recognition). Polls OCR every 2 seconds, caps at 110s (below Codex MCP 120s kill). Result: `done:true` = finished, act now. `still_running:true` = NOT finished, progress may look frozen but this is NORMAL — subtitle recognition routinely stays at the same percentage (e.g. '45%') for 30-60 seconds during heavy processing. ALWAYS call watch_progress again. NEVER cancel or re-trigger the original action based on still_running alone.",
                 props: [
                     "bundle_id": str("App bundle identifier"),
                     "disappears": str("Text that should disappear, e.g. '%' for progress bars"),
