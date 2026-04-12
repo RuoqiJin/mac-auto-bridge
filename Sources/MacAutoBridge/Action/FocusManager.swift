@@ -74,13 +74,51 @@ final class FocusManager: @unchecked Sendable {
         return true
     }
 
+    /// Verify focus before action. If drifted, try to re-acquire silently.
+    /// Only throws if re-acquisition fails (target app no longer running).
+    /// This makes action tools transparent to focus drift — agent doesn't need to manage focus.
     func verify() throws {
         guard let expected = lockedBundleID else { return }
-        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == expected else {
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == expected {
+            return
+        }
+
+        // Focus drifted — try to re-acquire silently
+        let app = NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier == expected
+        } ?? NSRunningApplication.runningApplications(withBundleIdentifier: expected).first
+
+        guard let app else {
             let actual = currentBundleID()
             release()
             throw BridgeError.focusLost(expected: expected, actual: actual)
         }
+
+        app.activate()
+
+        // Brief sync poll (sync because verify() is called from event synthesis)
+        for _ in 0..<20 {
+            Thread.sleep(forTimeInterval: 0.05)  // 50ms × 20 = 1s max
+            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == expected {
+                return
+            }
+        }
+
+        // Last resort: AppleScript activation
+        let script = NSAppleScript(source: "tell application id \"\(expected)\" to activate")
+        script?.executeAndReturnError(nil)
+
+        for _ in 0..<10 {
+            Thread.sleep(forTimeInterval: 0.05)
+            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == expected {
+                return
+            }
+        }
+
+        // Couldn't re-acquire — throw to prevent clicking wrong app
+        let actual = currentBundleID()
+        release()
+        throw BridgeError.focusLost(expected: expected, actual: actual)
     }
 
     func release() {
