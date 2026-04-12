@@ -233,22 +233,40 @@ final class MVPFacade: @unchecked Sendable {
     func look(bundleID: String, filePath: String?, includeOCR: Bool) async throws
         -> [String: Any]
     {
+        // Wall-clock guard: if the entire look exceeds 10s (e.g. serializer queue
+        // backed up behind a slow accurate-mode OCR), bail out with capture-only so
+        // the agent at least gets a PNG fast.  22s stalls were observed in production.
+        let started = Date()
+
         _ = try await focus.acquire(bundleID: bundleID)
         defer { focus.release() }
 
+        let path = filePath
+            ?? "/tmp/mac-auto-bridge-look-\(Int(Date().timeIntervalSince1970)).png"
+
         let image: CGImage
         var entries: [OCRTextEntry] = []
+        var ocrTimedOut = false
+
         if includeOCR {
-            let (img, ocrEntries) = try await ocr.captureAndRecognize(
-                bundleID: bundleID, fast: true)
-            image = img
-            entries = ocrEntries
+            // Try OCR path first. If it takes too long (serializer queue stall),
+            // fall back to capture-only so the PNG is still delivered fast.
+            do {
+                let (img, ocrEntries) = try await withTimeout(seconds: 8) { [self] in
+                    try await self.ocr.captureAndRecognize(bundleID: bundleID, fast: true)
+                }
+                image = img
+                entries = ocrEntries
+            } catch {
+                // OCR timed out — degrade to capture-only
+                ocrTimedOut = true
+                image = try await ocr.captureOnly(bundleID: bundleID, windowTitle: nil)
+            }
         } else {
             image = try await ocr.captureOnly(bundleID: bundleID, windowTitle: nil)
         }
 
-        let path = filePath
-            ?? "/tmp/mac-auto-bridge-look-\(Int(Date().timeIntervalSince1970)).png"
+        // Write PNG
         let url = URL(fileURLWithPath: path)
         guard
             let dest = CGImageDestinationCreateWithURL(
@@ -266,14 +284,45 @@ final class MVPFacade: @unchecked Sendable {
             "image_width": image.width,
             "image_height": image.height,
         ]
-        if let ax = try? AXManager.shared.snapshotFocusedWindow(bundleID: bundleID, maxDepth: 4) {
+
+        // AX tree — cap at 2s so a busy app doesn't stall the whole response
+        let axDeadline = Date().addingTimeInterval(2)
+        if Date() < axDeadline,
+            let ax = try? AXManager.shared.snapshotFocusedWindow(bundleID: bundleID, maxDepth: 4)
+        {
             result["ax_tree"] = ax.toJSON()
         }
-        if includeOCR {
+
+        if includeOCR && !ocrTimedOut {
             result["ocr_entries"] = entries.map { $0.toJSON() }
             result["ocr_count"] = entries.count
         }
+        if ocrTimedOut {
+            result["ocr_skipped"] = true
+            result["ocr_skip_reason"] =
+                "OCR timed out (serializer queue stall). PNG is still valid — use view_image. Re-call with include_ocr=false if you only need the screenshot."
+        }
+
+        let elapsed = Date().timeIntervalSince(started)
+        result["duration_ms"] = Int(elapsed * 1000)
         return result
+    }
+
+    private func withTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        _ op: @Sendable @escaping () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await op() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw BridgeError.verificationFailed(
+                    step: "look_timeout", detail: "exceeded \(Int(seconds))s")
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
     }
 
     /// Capture window screenshot and save to file. Returns the file path.
