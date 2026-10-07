@@ -380,7 +380,7 @@ final class MVPFacade: @unchecked Sendable {
     }
 
     /// Scroll in a direction until target text appears (or max scrolls reached).
-    /// Long search terms are auto-shortened (e.g. "pcea-talk-ep104-yoha.mp3" → "ep104").
+    /// Long search terms are auto-shortened (e.g. "podcast-ep104-sample.mp3" → "ep104").
     /// Returns the found OCR entry on success. Throws on timeout.
     func scrollUntilText(
         bundleID: String, text: String, direction: String, maxScrolls: Int,
@@ -437,7 +437,7 @@ final class MVPFacade: @unchecked Sendable {
     // MARK: - Private Helpers
 
     /// Shorten long text for OCR matching. OCR often breaks long filenames across lines.
-    /// "pcea-talk-ep104-yoha.mp3" → "ep104" (extract episode-like pattern)
+    /// "podcast-ep104-sample.mp3" → "ep104" (extract episode-like pattern)
     /// "some,keywords" → passed through (already multi-keyword)
     /// Short text (≤15 chars) → passed through unchanged
     private func shortenForOCR(_ text: String) -> String {

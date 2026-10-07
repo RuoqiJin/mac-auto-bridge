@@ -38,10 +38,12 @@ final class LocatorEngine: @unchecked Sendable {
     }
 
     private func resolveOCR(text: String, bundleID: String?, nth: Int) async throws -> CGRect {
-        let entries = try await ocr.findTextOnScreen(text: text, bundleID: bundleID)
+        // Auto-shorten long text for OCR robustness (e.g. "podcast-ep104-sample.mp3" → "ep104")
+        let searchText = shortenForOCR(text)
+        let entries = try await ocr.findTextOnScreen(text: searchText, bundleID: bundleID)
         guard entries.count >= nth else {
             throw BridgeError.elementNotFound(
-                "OCR text '\(text)' (found \(entries.count), need #\(nth))")
+                "OCR text '\(text)' (shortened: '\(searchText)', found \(entries.count), need #\(nth))")
         }
         return entries[nth - 1].frame
     }

@@ -4,4 +4,18 @@
 xcuserdata/
 DerivedData/
 .DS_Store
-.missiond/
+
+# Local credentials and private capture/log artifacts
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+mac-auto-bridge-look-*.png
+mac-auto-bridge-capture-*.png
+
+# Optional OCR weights stay local; never publish model binaries
+Sources/MacAutoBridge/Resources/models/*.onnx

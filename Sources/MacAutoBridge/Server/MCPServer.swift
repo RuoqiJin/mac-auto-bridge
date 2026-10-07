@@ -2,9 +2,12 @@ import Foundation
 
 final class MCPServer: @unchecked Sendable {
 
-    private let registry = ToolRegistry()
+    private let router: ToolRouter
+    private let ctx: ToolContext
 
-    init() {
+    init(router: ToolRouter, ctx: ToolContext) {
+        self.router = router
+        self.ctx = ctx
         log("MCPServer initialized")
     }
 
@@ -16,13 +19,13 @@ final class MCPServer: @unchecked Sendable {
             if let response = try await processMessage(trimmed) {
                 let data = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])
                 if let jsonString = String(data: data, encoding: .utf8) {
-                    log("stdout >> \(jsonString.prefix(200))")
+                    log("stdout response sent (\(data.count) bytes)")
                     print(jsonString)
                     fflush(stdout)
                 }
             }
         } catch {
-            log("ERROR: \(error)")
+            log("ERROR: request processing failed")
             if let data = trimmed.data(using: .utf8),
                 let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                 let id = json["id"]
@@ -49,26 +52,27 @@ final class MCPServer: @unchecked Sendable {
             return ok(id: id, result: [
                 "protocolVersion": "2024-11-05",
                 "capabilities": ["tools": [:] as [String: Any]],
-                "serverInfo": ["name": "MacAutoBridge", "version": "0.1.0"],
+                "serverInfo": ["name": "MacAutoBridge", "version": "0.2.0"],
             ])
 
         case "ping":
             return ok(id: id, result: [:])
 
         case "tools/list":
-            return ok(id: id, result: ["tools": registry.listTools()])
+            return ok(id: id, result: ["tools": router.listTools()])
 
         case "tools/call":
             let params = json["params"] as? [String: Any] ?? [:]
             let toolName = params["name"] as? String ?? ""
             let arguments = params["arguments"] as? [String: Any] ?? [:]
 
-            // Wall-clock guard: Codex MCP client kills any call at 120s.
-            // Cap every tool at 100s so we always return a clean response
-            // instead of getting silently killed mid-flight.
+            // Wall-clock guard: per-tool timeout (default 100s).
+            // Long-running workflow tools can override to e.g. 600s.
+            let toolTimeout = router.timeout(for: toolName)
             do {
-                let result = try await withToolTimeout(seconds: 100) {
-                    try await self.registry.callTool(name: toolName, arguments: arguments)
+                let result = try await withDeadline(seconds: toolTimeout, step: "tool_timeout") {
+                    try await self.router.callTool(
+                        name: toolName, arguments: arguments, ctx: self.ctx)
                 }
                 return ok(id: id, result: result)
             } catch {
@@ -84,26 +88,6 @@ final class MCPServer: @unchecked Sendable {
 
         default:
             return err(id: id, code: -32601, message: "Method not found: \(method ?? "nil")")
-        }
-    }
-
-    // MARK: - Timeout
-
-    private func withToolTimeout<T: Sendable>(
-        seconds: TimeInterval,
-        _ op: @Sendable @escaping () async throws -> T
-    ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask { try await op() }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw BridgeError.verificationFailed(
-                    step: "tool_timeout",
-                    detail: "Tool call exceeded \(Int(seconds))s wall-clock limit")
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
         }
     }
 

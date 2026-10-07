@@ -18,24 +18,24 @@ final class OCRManager: @unchecked Sendable {
         }
     }
 
-    private func _captureAndRecognize(
+    // internal (not private) so CaptureGate can bypass CaptureSerializer
+    func _captureAndRecognize(
         bundleID: String, windowTitle: String? = nil, fast: Bool = false
     ) async throws -> (CGImage, [OCRTextEntry]) {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
 
-        // If windowTitle specified → single window capture (precise)
-        if windowTitle != nil {
-            guard
-                let window = selectBestWindow(
-                    from: content.windows, bundleID: bundleID, windowTitle: windowTitle)
+        // Validate windowTitle exists if specified (but always use app-level capture)
+        if let title = windowTitle {
+            guard selectBestWindow(
+                from: content.windows, bundleID: bundleID, windowTitle: title) != nil
             else {
-                throw BridgeError.elementNotFound("Window '\(windowTitle!)' for \(bundleID)")
+                throw BridgeError.elementNotFound("Window '\(title)' for \(bundleID)")
             }
-            return try await captureSingleWindow(window: window, fast: fast)
         }
 
-        // Default: capture ALL windows from this app (includes popups, dialogs, menus)
+        // ALWAYS use app-level capture — includes popups, dialogs, context menus.
+        // Single-window capture (desktopIndependentWindow) misses overlays.
         guard let app = content.applications.first(where: {
             $0.bundleIdentifier == bundleID
         }) else {
@@ -114,28 +114,22 @@ final class OCRManager: @unchecked Sendable {
         }
     }
 
-    private func _captureOnly(bundleID: String, windowTitle: String? = nil) async throws -> CGImage
+    // internal (not private) so CaptureGate can bypass CaptureSerializer
+    func _captureOnly(bundleID: String, windowTitle: String? = nil) async throws -> CGImage
     {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
 
+        // Validate windowTitle exists if specified (but always use app-level capture)
         if let title = windowTitle {
-            guard let window = selectBestWindow(
-                from: content.windows, bundleID: bundleID, windowTitle: title)
+            guard selectBestWindow(
+                from: content.windows, bundleID: bundleID, windowTitle: title) != nil
             else {
                 throw BridgeError.elementNotFound("Window '\(title)' for \(bundleID)")
             }
-            let scale = displayScale(for: window.frame)
-            let filter = SCContentFilter(desktopIndependentWindow: window)
-            let config = SCStreamConfiguration()
-            config.width = Int(window.frame.width * scale)
-            config.height = Int(window.frame.height * scale)
-            config.showsCursor = false
-            return try await SCScreenshotManager.captureImage(
-                contentFilter: filter, configuration: config)
         }
 
-        // App-level capture (includes popups/menus)
+        // ALWAYS use app-level capture — includes popups, dialogs, context menus.
         guard let app = content.applications.first(where: {
             $0.bundleIdentifier == bundleID
         }) else {
@@ -240,7 +234,8 @@ final class OCRManager: @unchecked Sendable {
         }
     }
 
-    private func _findTextOnScreenAllDisplays(text: String) async throws -> [OCRTextEntry] {
+    // internal (not private) so CaptureGate can bypass CaptureSerializer
+    func _findTextOnScreenAllDisplays(text: String) async throws -> [OCRTextEntry] {
         let keywords = text.split(separator: ",").map {
             $0.trimmingCharacters(in: .whitespaces)
         }
@@ -293,11 +288,30 @@ final class OCRManager: @unchecked Sendable {
 
     // MARK: - OCR Engine
 
+    /// Domain-specific vocabulary injected into Vision's language model.
+    /// Dramatically improves recognition of UI terms that Vision's default
+    /// dictionary doesn't know (e.g. 剪映 menu items, video editing terms).
+    static let customWords: [String] = [
+        // 剪映 UI
+        "导出", "导入", "识别字幕", "识别字幕/歌词", "字幕", "歌词",
+        "时间线", "新建时间线", "根据选中素材新建时间线",
+        "素材", "音频", "视频", "图片", "文字", "贴纸", "特效", "转场", "滤镜",
+        "已添加", "未添加", "草稿", "剪映专业版",
+        "删除", "复制", "粘贴", "撤销", "全选", "剪切",
+        "关闭", "取消", "确定", "打开", "保存",
+        "打开文件夹", "打开草稿", "导出完成",
+        "比例", "分辨率", "帧率", "码率",
+        // macOS common
+        "新建文件夹", "排序", "属性", "退回未选择的素材",
+    ]
+
     func recognizeText(in image: CGImage, fast: Bool = false) throws -> [OCRTextEntry] {
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = fast ? .fast : .accurate
+        // Chinese requires .accurate — .fast does not support CJK
+        request.recognitionLevel = .accurate
         request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en"]
-        request.usesLanguageCorrection = false
+        request.usesLanguageCorrection = true
+        request.customWords = Self.customWords
 
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         try handler.perform([request])
@@ -306,7 +320,9 @@ final class OCRManager: @unchecked Sendable {
         let imageHeight = CGFloat(image.height)
 
         return (request.results ?? []).compactMap { observation in
-            guard let candidate = observation.topCandidates(1).first else { return nil }
+            // Take top 3 candidates — use highest confidence that meets threshold
+            let candidates = observation.topCandidates(3)
+            guard let best = candidates.first, best.confidence >= 0.3 else { return nil }
             let bb = observation.boundingBox
             // Vision: normalized coords, origin bottom-left → pixel coords, origin top-left
             let rect = CGRect(
@@ -315,7 +331,7 @@ final class OCRManager: @unchecked Sendable {
                 width: bb.width * imageWidth,
                 height: bb.height * imageHeight
             )
-            return OCRTextEntry(text: candidate.string, frame: rect, confidence: candidate.confidence)
+            return OCRTextEntry(text: best.string, frame: rect, confidence: best.confidence)
         }
     }
 
